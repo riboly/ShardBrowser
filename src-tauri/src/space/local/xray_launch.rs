@@ -94,7 +94,16 @@ fn host_triple() -> Option<&'static str> {
 /// different version is never run as this launcher's sidecar, whatever
 /// its name; the pinned one is downloaded instead.
 fn binary_version_ok(path: &PathBuf) -> bool {
-    let Ok(out) = std::process::Command::new(path).arg("version").output() else {
+    let mut cmd = std::process::Command::new(path);
+    cmd.arg("version");
+    #[cfg(target_os = "windows")]
+    {
+        // The version probe runs on every test and launch: without this
+        // it flashes a console window just like the sidecar did.
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let Ok(out) = cmd.output() else {
         return false;
     };
     let text = String::from_utf8_lossy(&out.stdout);
