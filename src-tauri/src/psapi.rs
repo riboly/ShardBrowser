@@ -184,6 +184,7 @@ pub async fn import_order_proxies(t: &crate::space::Ticket, order_id: i64, kind:
             port,
             username: s(&it, "username"),
             password: s(&it, "password"),
+            xray_link: None,
             country: String::new(),
             notes: format!("ProxyShard order {order_id}"),
         });
@@ -412,6 +413,7 @@ pub async fn residential_proxy(req: ResiRequest<'_>) -> Result<ProxyEntry> {
         port,
         username: login,
         password,
+        xray_link: None,
         country: req
             .country
             .map(|c| c.trim().to_uppercase())
