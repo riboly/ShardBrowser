@@ -22,6 +22,10 @@ export const xrayBindToProfile = (profileId: string, link: string) =>
 export const xrayUnbindFromProfile = (profileId: string) =>
   invoke("xray_unbind_from_profile", { profileId });
 
+/** Masked display of a profile's bound link, if any; never the link. */
+export const xrayBoundForProfile = (profileId: string) =>
+  invoke<string | null>("xray_bound_for_profile", { profileId });
+
 /** Test a link through a temporary Xray sidecar; exit IP is upstream's. */
 export const xrayTestLink = (link: string) =>
   invoke<ProxyTestSnapshot>("xray_test_link", { link });

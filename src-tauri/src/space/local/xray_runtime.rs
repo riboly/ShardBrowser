@@ -28,7 +28,10 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-pub const XRAY_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// Donut (`xray_worker_runner.rs`) gives a first start 30 s, because a
+/// first start on Windows can wait for antivirus to scan xray.exe. The
+/// old 5 s here was too short for exactly that case.
+pub const XRAY_HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn temp_file_stem(profile_id: &str) -> String {
     let safe: String = profile_id
@@ -190,7 +193,30 @@ fn outbound(link: &ParsedShareLink) -> Value {
 /// Build a complete Xray client config. Inbound is always a local SOCKS5
 /// (UDP enabled, for the QUIC/WebRTC probe in Module 4); outbound is the
 /// parsed upstream. No direct-connection fallback is configured.
+///
+/// Donut (`xray/client.rs`) puts a random username/password on the
+/// local inbound (`auth: "password"`), so any other local process cannot
+/// just use the profile's tunnel. `auth` carries that pair; `None` keeps
+/// the old open inbound, and is only for tests that do not start a
+/// sidecar. Production always passes `Some`.
 pub fn build_client_config(link: &ParsedShareLink, local_port: u16) -> Value {
+    build_client_config_auth(link, local_port, None)
+}
+
+pub fn build_client_config_auth(
+    link: &ParsedShareLink,
+    local_port: u16,
+    auth: Option<(&str, &str)>,
+) -> Value {
+    let settings = match auth {
+        Some((user, pass)) => json!({
+            "auth": "password",
+            "accounts": [{ "user": user, "pass": pass }],
+            "udp": true,
+            "ip": "127.0.0.1",
+        }),
+        None => json!({ "auth": "noauth", "udp": true }),
+    };
     json!({
         "log": { "loglevel": "warning" },
         "inbounds": [{
@@ -198,10 +224,25 @@ pub fn build_client_config(link: &ParsedShareLink, local_port: u16) -> Value {
             "port": local_port,
             "listen": "127.0.0.1",
             "protocol": "socks",
-            "settings": { "auth": "noauth", "udp": true },
+            "settings": settings,
         }],
         "outbounds": [outbound(link)],
     })
+}
+
+/// Random local SOCKS credentials, per sidecar start (Donut's
+/// `XrayWorkerConfig` does the same per worker). They never leave this
+/// machine: they go into the Xray config and into the engine's
+/// `--proxy-server` arg, and are dropped when the sidecar stops.
+fn random_local_credential() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..16)
+        .map(|_| {
+            let n = rng.gen_range(0..62);
+            (b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"[n as usize]) as char
+        })
+        .collect()
 }
 
 pub fn write_config(profile_id: &str, config: &Value) -> std::io::Result<PathBuf> {
@@ -227,9 +268,50 @@ pub fn wait_for_port(port: u16, timeout: Duration) -> bool {
     false
 }
 
+/// Donut's `authenticated_socks_ready`: a TCP connect alone proves
+/// nothing — another process could own the port, or Xray could still be
+/// loading. Do the SOCKS5 handshake with the local credentials and only
+/// return true when Xray itself answers the auth.
+pub fn wait_for_socks_auth(port: u16, user: &str, pass: &str, timeout: Duration) -> bool {
+    use std::io::{Read, Write};
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+            let mut ok = false;
+            if stream.write_all(&[5, 1, 2]).is_ok() {
+                let mut method = [0u8; 2];
+                if stream.read_exact(&mut method).is_ok() && method == [5, 2] {
+                    let mut auth = vec![1, user.len() as u8];
+                    auth.extend_from_slice(user.as_bytes());
+                    auth.push(pass.len() as u8);
+                    auth.extend_from_slice(pass.as_bytes());
+                    if stream.write_all(&auth).is_ok() {
+                        let mut resp = [0u8; 2];
+                        if stream.read_exact(&mut resp).is_ok() && resp == [1, 0] {
+                            ok = true;
+                        }
+                    }
+                }
+            }
+            if ok {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 pub struct XraySidecar {
     pub profile_id: String,
     pub local_port: u16,
+    /// Random per-start local SOCKS credentials (Donut-style). The
+    /// launcher hands them to the engine via the local proxy entry;
+    /// they are never written to the profile or logged.
+    pub local_user: String,
+    pub local_pass: String,
     pub config: PathBuf,
     pub log: PathBuf,
     child: Child,
@@ -242,7 +324,9 @@ impl XraySidecar {
         profile_id: &str,
         local_port: u16,
     ) -> Result<Self, String> {
-        let config = build_client_config(link, local_port);
+        let local_user = random_local_credential();
+        let local_pass = random_local_credential();
+        let config = build_client_config_auth(link, local_port, Some((&local_user, &local_pass)));
         let config_path = write_config(profile_id, &config)
             .map_err(|e| format!("failed to write Xray config: {e}"))?;
         let log_path = log_path(profile_id);
@@ -262,18 +346,20 @@ impl XraySidecar {
                 format!("failed to start Xray ({}): {e}", link.masked_display())
             })?;
         let _ = fs::write(pid_path(profile_id), child.id().to_string());
-        if !wait_for_port(local_port, XRAY_HEALTH_TIMEOUT) {
+        if !wait_for_socks_auth(local_port, &local_user, &local_pass, XRAY_HEALTH_TIMEOUT) {
             let _ = child.kill();
             let _ = child.wait();
             let _ = fs::remove_file(&config_path);
             return Err(format!(
-                "Xray did not listen on 127.0.0.1:{} within {:?}; see log {}",
+                "Xray did not answer SOCKS auth on 127.0.0.1:{} within {:?}; see log {}",
                 local_port, XRAY_HEALTH_TIMEOUT, log_path.display()
             ));
         }
         Ok(Self {
             profile_id: profile_id.to_string(),
             local_port,
+            local_user,
+            local_pass,
             config: config_path,
             log: log_path,
             child,
@@ -385,6 +471,41 @@ mod tests {
         let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
         assert!(wait_for_port(port, Duration::from_secs(2)));
         drop(listener);
+    }
+
+    /// Launch-layer isolation: two profiles built from different links
+    /// get different local ports and different upstream outbounds, so
+    /// starting profile A never routes through profile B's node.
+    #[test]
+    fn two_profiles_get_different_ports_and_outbounds() {
+        let a = parse_share_link("vless://11111111-2222-3333-4444-555555555555@node-a.invalid:443#node-a").unwrap();
+        let b = parse_share_link("trojan://pass@node-b.invalid:8443#node-b").unwrap();
+        let port_a = free_port().unwrap();
+        let port_b = free_port().unwrap();
+        assert_ne!(port_a, port_b);
+        let cfg_a = build_client_config(&a, port_a);
+        let cfg_b = build_client_config(&b, port_b);
+        assert_eq!(cfg_a["inbounds"][0]["port"], port_a);
+        assert_eq!(cfg_b["inbounds"][0]["port"], port_b);
+        assert_eq!(cfg_a["outbounds"][0]["settings"]["vnext"][0]["address"], "node-a.invalid");
+        assert_eq!(cfg_b["outbounds"][0]["settings"]["servers"][0]["address"], "node-b.invalid");
+    }
+
+    #[test]
+    fn auth_config_puts_random_credentials_on_local_inbound_only() {
+        let link = vless();
+        let cfg = build_client_config_auth(&link, 18083, Some(("local-user", "local-pass")));
+        let inbound = &cfg["inbounds"][0];
+        assert_eq!(inbound["settings"]["auth"], "password");
+        assert_eq!(inbound["settings"]["accounts"][0]["user"], "local-user");
+        assert_eq!(inbound["settings"]["accounts"][0]["pass"], "local-pass");
+        // The local credential must not leak into the outbound.
+        let out = serde_json::to_string(&cfg["outbounds"]).unwrap();
+        assert!(!out.contains("local-user"));
+        assert!(!out.contains("local-pass"));
+        // Noauth delegate keeps the old shape for tests that do not start a sidecar.
+        let plain = build_client_config(&link, 18083);
+        assert_eq!(plain["inbounds"][0]["settings"]["auth"], "noauth");
     }
 
     #[test]

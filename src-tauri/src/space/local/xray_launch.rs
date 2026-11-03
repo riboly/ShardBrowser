@@ -34,15 +34,20 @@ fn registry() -> &'static Mutex<HashMap<String, XraySidecar>> {
 
 /// Local SOCKS5 entry for an Xray sidecar. Its id is fixed so the
 /// existing proxy-test cache never mixes it up with a real upstream proxy.
-pub fn local_proxy_entry(local_port: u16) -> ProxyEntry {
+/// Donut-style: it carries the sidecar's random local credentials, so
+/// the engine's `--proxy-server` arg (built by `to_proxy_server_arg`,
+/// which percent-encodes userinfo) authenticates to the local inbound.
+/// An unauthenticated local SOCKS would let any local process use the
+/// profile's tunnel.
+pub fn local_proxy_entry(local_port: u16, username: &str, password: &str) -> ProxyEntry {
     ProxyEntry {
         id: "xray-local".to_string(),
         name: "Xray (local)".to_string(),
         kind: ProxyKind::Socks5,
         host: "127.0.0.1".to_string(),
         port: local_port,
-        username: String::new(),
-        password: String::new(),
+        username: username.to_string(),
+        password: password.to_string(),
         country: String::new(),
         notes: String::new(),
     }
@@ -111,7 +116,7 @@ pub fn start_xray_for_profile(profile_id: &str, link: &str) -> Result<ProxyEntry
     // leave two Xray processes behind.
     stop_xray_for_profile(profile_id);
     let sidecar = XraySidecar::start(&binary, &parsed, profile_id, port)?;
-    let entry = local_proxy_entry(port);
+    let entry = local_proxy_entry(port, &sidecar.local_user, &sidecar.local_pass);
     if let Ok(mut g) = registry().lock() {
         g.insert(profile_id.to_string(), sidecar);
     }
@@ -139,11 +144,12 @@ mod tests {
 
     #[test]
     fn local_entry_is_socks5_localhost_and_arg_is_local() {
-        let entry = local_proxy_entry(18080);
+        let entry = local_proxy_entry(18080, "u1", "p1");
         assert_eq!(entry.host, "127.0.0.1");
         assert_eq!(entry.port, 18080);
         assert!(matches!(entry.kind, ProxyKind::Socks5));
-        assert_eq!(entry.to_proxy_server_arg(), "socks5://127.0.0.1:18080");
+        // Donut-style local auth travels in the engine arg, percent-encoded.
+        assert_eq!(entry.to_proxy_server_arg(), "socks5://u1:p1@127.0.0.1:18080");
         assert_eq!(local_proxy_server_arg(18080), "socks5://127.0.0.1:18080");
     }
 

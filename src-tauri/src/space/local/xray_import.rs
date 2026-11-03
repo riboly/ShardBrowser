@@ -125,4 +125,82 @@ mod tests {
         assert!(bind_link(&mut s, "socks5://example.invalid:1080").is_err());
         assert!(s.meta.xray_link.is_none());
     }
+
+    /// Per-profile isolation: two profiles bind different nodes, and
+    /// neither one's link, masked display or proxy state leaks into the
+    /// other. This is the test the "one node per profile" claim rests on.
+    #[test]
+    fn two_profiles_keep_different_links() {
+        let mut a = stored();
+        let mut b = stored();
+        a.meta.id = "profile-a".to_string();
+        b.meta.id = "profile-b".to_string();
+        let masked_a = bind_link(
+            &mut a,
+            "vless://11111111-2222-3333-4444-555555555555@node-a.invalid:443#node-a",
+        )
+        .unwrap();
+        let masked_b = bind_link(&mut b, "trojan://secret-pass@node-b.invalid:8443#node-b").unwrap();
+        assert_eq!(masked_a, "vless://node-a.invalid:443");
+        assert_eq!(masked_b, "trojan://node-b.invalid:8443");
+        assert_ne!(a.meta.xray_link, b.meta.xray_link);
+        assert!(a.meta.xray_link.as_deref().unwrap().contains("node-a.invalid"));
+        assert!(b.meta.xray_link.as_deref().unwrap().contains("node-b.invalid"));
+        // Neither masked display may carry the other profile's credential.
+        assert!(!masked_a.contains("secret-pass"));
+        assert!(!masked_b.contains("11111111"));
+    }
+
+    #[test]
+    fn binding_one_profile_leaves_the_other_untouched() {
+        let mut a = stored();
+        let mut b = stored();
+        b.meta.proxy_id = Some("b-proxy".to_string());
+        bind_link(&mut b, "trojan://pass@node-b.invalid:443#node-b").unwrap();
+        // A is bound afterwards: B keeps its link and its proxy state
+        // (bind clears only the profile it is called on, and B's proxy
+        // was already cleared by its own bind, not by A's).
+        bind_link(
+            &mut a,
+            "vless://11111111-2222-3333-4444-555555555555@node-a.invalid:443#node-a",
+        )
+        .unwrap();
+        assert_eq!(b.meta.xray_link.as_deref(), Some("trojan://pass@node-b.invalid:443#node-b"));
+        assert!(b.meta.proxy_id.is_none());
+        assert_eq!(a.meta.xray_link.as_deref(), Some("vless://11111111-2222-3333-4444-555555555555@node-a.invalid:443#node-a"));
+    }
+
+    #[test]
+    fn unbinding_one_profile_leaves_the_other_bound() {
+        let mut a = stored();
+        let mut b = stored();
+        bind_link(
+            &mut a,
+            "vless://11111111-2222-3333-4444-555555555555@node-a.invalid:443#node-a",
+        )
+        .unwrap();
+        bind_link(&mut b, "trojan://pass@node-b.invalid:443#node-b").unwrap();
+        unbind_link(&mut a);
+        assert!(a.meta.xray_link.is_none());
+        assert!(b.meta.xray_link.is_some());
+    }
+
+    #[test]
+    fn rebinding_replaces_only_that_profiles_link() {
+        let mut a = stored();
+        let mut b = stored();
+        bind_link(
+            &mut a,
+            "vless://11111111-2222-3333-4444-555555555555@node-a.invalid:443#old",
+        )
+        .unwrap();
+        bind_link(&mut b, "trojan://pass@node-b.invalid:443#node-b").unwrap();
+        bind_link(
+            &mut a,
+            "vless://99999999-8888-7777-6666-555555555555@node-a2.invalid:443#new",
+        )
+        .unwrap();
+        assert!(a.meta.xray_link.as_deref().unwrap().contains("node-a2.invalid"));
+        assert_eq!(b.meta.xray_link.as_deref(), Some("trojan://pass@node-b.invalid:443#node-b"));
+    }
 }

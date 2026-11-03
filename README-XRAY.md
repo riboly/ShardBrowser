@@ -164,3 +164,35 @@ AI maintenance limits (state this honestly to the user, every time):
   commands, and end-to-end launch/stop verification with a real node and
   the Windows build. Those are the remaining steps before claiming the
   feature works end to end.
+- 2026-11-03: Per-profile nodes, confirmed in code and tests. Each
+  profile stores its own `_meta.xray_link`; launch allocates a free
+  local port per profile and starts a sidecar keyed by profile_id, so
+  two profiles can use two different nodes at once without sharing a
+  port or a tunnel. `save_raw` carries a bound link through a plain
+  form edit (a content edit only — a meta-only write with no link is
+  an explicit unbind and is respected). Profile editor UI added:
+  Proxy tab → Xray row (paste link, backend-validated as typed on a
+  300 ms debounce like Donut's proxy form, Parse, Test through a
+  temporary sidecar showing exit IP/country/latency, Unbind), in
+  zh/en/ru; team profiles show no Xray row (personal-space only).
+- 2026-11-03: Donut reference adopted, UI aside. Donut
+  (`donutbrowser/donutbrowser`, `src-tauri/src/xray/`,
+  `xray_worker_runner.rs`, `proxy-form-dialog.tsx`) stores an Xray
+  node as a proxy object with a `vless_uri` and validates the link
+  through the backend before it counts; Shard keeps the different
+  shape (a link bound to a profile, not a shared proxy object),
+  because Shard profiles already bind one proxy each. What was taken
+  from Donut, verbatim in behaviour: (1) the local inbound uses a
+  random username/password per start (`auth: "password"`), and the
+  engine's `--proxy-server` arg carries those credentials via
+  `to_proxy_server_arg()` — an open local SOCKS would let any local
+  process use the tunnel; (2) readiness is a SOCKS5 auth handshake,
+  not a TCP connect; (3) the start timeout is 30 s, because a first
+  start on Windows can wait for antivirus to scan xray.exe.
+  NOT taken from Donut: its Hysteria2 mapping (protocol `hysteria`,
+  version 2) — Shard keeps `hysteria2` as its protocol name, and a
+  real Hysteria2 node test will decide which mapping is right for
+  Xray v26.3.27. NOT yet done: end-to-end launch/stop verification
+  with a real node and the Windows build (now Windows-only workflow,
+  commit 25d7bb8), and a real-node test of the authenticated local
+  inbound through the engine's proxy arg.

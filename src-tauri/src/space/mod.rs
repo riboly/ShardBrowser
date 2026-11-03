@@ -1237,6 +1237,18 @@ pub mod xray {
         super::local::profile::save_raw(&mut stored)?;
         Ok(())
     }
+    /// Masked display of the link bound to a profile, if any. Never the
+    /// link itself: the editor shows only `scheme://host:port`, and the
+    /// full link stays on disk until launch reads it.
+    pub fn bound_for_profile(profile_id: &str) -> Result<Option<String>> {
+        super::personal_only()?;
+        let stored = super::profile::load_raw(profile_id)?;
+        let Some(link) = stored.meta.xray_link.as_deref() else {
+            return Ok(None);
+        };
+        let parsed = super::local::xray_share::parse_share_link(link).map_err(anyhow::Error::msg)?;
+        Ok(Some(parsed.masked_display()))
+    }
     /// Test a share link through a temporary Xray sidecar: start it, run
     /// the existing proxy test against its LOCAL port (so the reported
     /// exit IP / country are the upstream's, never 127.0.0.1), stop it.

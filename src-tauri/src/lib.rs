@@ -1604,6 +1604,12 @@ fn xray_unbind_from_profile(profile_id: String) -> Result<(), String> {
     space::xray::unbind_from_profile(&profile_id).map_err(|e| e.to_string())
 }
 
+/// Masked display of a profile's bound Xray link, if any; never the link.
+#[tauri::command]
+fn xray_bound_for_profile(profile_id: String) -> Result<Option<String>, String> {
+    space::xray::bound_for_profile(&profile_id).map_err(|e| e.to_string())
+}
+
 /// Test a share link through a temporary Xray sidecar (local port).
 #[tauri::command]
 async fn xray_test_link(link: String) -> Result<space::proxy::TestSnapshot, String> {
@@ -2743,6 +2749,7 @@ pub fn run() {
             xray_bulk_parse,
             xray_bind_to_profile,
             xray_unbind_from_profile,
+            xray_bound_for_profile,
             xray_test_link,
             proxy_bulk_save,
             launch,
