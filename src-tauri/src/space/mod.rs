@@ -1199,3 +1199,19 @@ mod tests {
         assert_eq!(folder_of("fb2"), "");
     }
 }
+
+/// Xray sidecar launch facade (Module 4). The local modules stay private
+/// to `space`; launch.rs goes through this facade, like `space::proxy`.
+pub mod xray {
+    use super::local::xray_launch as local;
+    pub use local::{local_proxy_entry, local_proxy_server_arg, resolve_xray_binary, xray_running_for};
+    pub fn start_for_profile(profile_id: &str, link: &str) -> Result<super::proxy::ProxyEntry, String> {
+        local::start_xray_for_profile(profile_id, link)
+    }
+    pub fn stop_for_profile(profile_id: &str) {
+        local::stop_xray_for_profile(profile_id);
+    }
+    pub fn running_for(profile_id: &str) -> bool {
+        local::xray_running_for(profile_id)
+    }
+}
