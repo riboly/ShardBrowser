@@ -725,6 +725,7 @@ struct AddProxyReq {
     username: Option<String>,
     password: Option<String>,
     name: Option<String>,
+    xray_link: None,
     country: Option<String>,
     notes: Option<String>,
 }
@@ -755,6 +756,7 @@ async fn add_proxy(Extension(t): Extension<Ticket>, Json(body): Json<AddProxyReq
             port,
             username: body.username.clone().unwrap_or_default(),
             password: body.password.clone().unwrap_or_default(),
+            xray_link: None,
             country: String::new(),
             notes: String::new(),
         }
