@@ -561,8 +561,41 @@ async fn start_browser(bin: &Path, input: LaunchInput, opts: &LaunchOpts<'_>) ->
     // QUIC / WebRTC gating) work on its local SOCKS5 entry. On failure,
     // fail closed: do not launch the profile at all.
     let mut input = input;
+    // Xray as a proxy entry (the proxy-page model): a profile whose
+    // bound proxy is an Xray node starts a sidecar for that node and
+    // runs through its local SOCKS5 entry, exactly like the legacy
+    // per-profile binding below. Either way, one profile's sidecar is
+    // its own process on its own free local port: it never shares a
+    // port, a config file or a process with v2rayN's Xray, and the
+    // launcher never stops another tool's processes (cleanup only
+    // touches pid files this launcher wrote, whose command lines
+    // reference a shard-xray config).
+    if input.stored.meta.xray_link.is_none() {
+        if let Some(p) = input.proxy.clone() {
+            if p.kind == proxy::ProxyKind::Xray {
+                if let Some(link) = p.xray_link.clone() {
+                    match crate::space::xray::start_for_profile(&input.profile_id, &link).await {
+                        Ok(local) => {
+                            eprintln!(
+                                "[launcher] Xray started for profile {} on {}",
+                                input.profile_id,
+                                local.to_proxy_server_arg()
+                            );
+                            input.proxy = Some(local);
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!(
+                                "Xray failed to start for profile {}: {e} — profile not launched",
+                                input.profile_id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
     if let Some(link) = input.stored.meta.xray_link.clone() {
-        match crate::space::xray::start_for_profile(&input.profile_id, &link) {
+        match crate::space::xray::start_for_profile(&input.profile_id, &link).await {
             Ok(local) => {
                 eprintln!(
                     "[launcher] Xray started for profile {} on {}",
