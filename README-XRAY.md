@@ -27,7 +27,7 @@ share link cannot be parsed by that model, so import fails before launch.
 
 ## Module 1: Share-link parsing (START HERE)
 
-Status: NOT implemented yet. This is the first task.
+Status: DONE 2026-11-03. Parser in src-tauri/src/space/local/xray_share.rs, 12 unit tests pass (standalone crate, same deps). Non-Xray schemes error so callers fall back to the existing path.
 
 1.1 Supported schemes (in order):
   - vless://, vmess://, trojan://, ss://, shadowsocks://, hysteria2://, hy2://
@@ -149,5 +149,18 @@ AI maintenance limits (state this honestly to the user, every time):
 ## Current status
 
 - 2026-11-03: Fork created (riboly/ShardBrowser), branch feature/xray-proxy
-  created from upstream main (880fef1). No Xray code implemented yet.
-  Next task: Module 1, share-link parsing, per the task list above.
+  created from upstream main (880fef1).
+- 2026-11-03: Module 1 DONE (share-link parsing, 12 tests).
+  Module 2 DONE (Xray v26.3.27 pinned, SHA256 table + download script, 4 tests).
+  Module 3 DONE (config builder + sidecar lifecycle, fail closed, 4 tests).
+  Module 4 DONE in code (launch.rs starts Xray sidecar, engine gets local
+  SOCKS5, watcher stops sidecar on profile stop). Full Linux `cargo check`
+  is blocked by a missing libclang (system apt lock held by a runtime
+  replay process); file parses via rustfmt, but full compile is NOT yet
+  verified on Linux. Windows Actions build is the real verification.
+- 2026-11-03: Module 5 backend DONE (bulk parse, bind/unbind to profile,
+  test-through-Xray, Tauri commands + frontend API, 3 import tests).
+  NOT yet done: a button in the profile editor UI that calls these
+  commands, and end-to-end launch/stop verification with a real node and
+  the Windows build. Those are the remaining steps before claiming the
+  feature works end to end.
