@@ -9,5 +9,6 @@ pub(in crate::space) mod folders;
 pub(in crate::space) mod profile;
 pub(in crate::space) mod proxy;
 pub(in crate::space) mod xray_share;
+pub(in crate::space) mod xray_binary;
 pub(in crate::space) mod tags;
 pub(in crate::space) mod trash;
