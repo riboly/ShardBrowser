@@ -152,6 +152,11 @@ pub struct StoredMeta {
     /// Inline proxy from temporary profile API; not in proxy store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_proxy: Option<super::proxy::ProxyEntry>,
+    /// Xray share link for this profile (Module 4/5). When set, launch
+    /// starts an Xray sidecar and the engine uses its local SOCKS5 instead
+    /// of any bound proxy. Stored like other proxy credentials: never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xray_link: Option<String>,
     /// Hidden from listings; auto-deleted on close.
     #[serde(default, skip_serializing_if = "is_false")]
     pub temporary: bool,
