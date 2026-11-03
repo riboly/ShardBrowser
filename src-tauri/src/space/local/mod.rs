@@ -12,5 +12,6 @@ pub(in crate::space) mod xray_share;
 pub(in crate::space) mod xray_binary;
 pub(in crate::space) mod xray_runtime;
 pub(in crate::space) mod xray_launch;
+pub(in crate::space) mod xray_import;
 pub(in crate::space) mod tags;
 pub(in crate::space) mod trash;
