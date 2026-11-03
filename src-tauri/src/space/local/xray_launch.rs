@@ -98,7 +98,14 @@ fn binary_version_ok(path: &PathBuf) -> bool {
         return false;
     };
     let text = String::from_utf8_lossy(&out.stdout);
-    out.status.success() && text.starts_with("Xray ") && text.contains(super::xray_binary::XRAY_VERSION)
+    // `xray version` prints "Xray 26.3.27 (...)", with no "v": checking
+    // for the tag form "v26.3.27" rejected every genuine binary, so
+    // every Xray test fell through to a download that then failed the
+    // same check. Compare the bare number.
+    let pinned = super::xray_binary::XRAY_VERSION
+        .strip_prefix('v')
+        .unwrap_or(super::xray_binary::XRAY_VERSION);
+    out.status.success() && text.starts_with("Xray ") && text.contains(pinned)
 }
 
 /// Candidate binaries, most launcher-controlled first: an env override,
@@ -149,13 +156,33 @@ pub fn resolve_xray_binary() -> Result<PathBuf, String> {
     )
 }
 
+/// One download attempt: direct when `direct` is set, otherwise
+/// through whatever proxy the system environment names.
+async fn fetch_archive(url: &str, direct: bool) -> Result<bytes::Bytes, String> {
+    let builder = reqwest::Client::builder();
+    let builder = if direct { builder.no_proxy() } else { builder };
+    let client = builder
+        .build()
+        .map_err(|e| format!("failed to build download client: {e}"))?;
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("failed to download Xray: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("failed to download Xray: HTTP {}", resp.status()));
+    }
+    resp.bytes().await.map_err(|e| format!("failed to read Xray download: {e}"))
+}
+
 /// Ensure a pinned sidecar exists, downloading it on first use when
 /// no bundled one is found (the portable copy's case). The archive is
 /// verified by SHA256 in memory before anything is written, only the
 /// `xray` binary is extracted, and it is version-checked before use.
-/// Download goes direct, never through a local proxy: routing it
-/// through v2rayN's own inbound would make this launcher depend on
-/// the very tool it must not conflict with.
+/// Download tries direct first, then the system proxy: direct GitHub
+/// is unreachable from some networks, and a failed download must not
+/// be the reason an installed build's tests all fail. This is only a
+/// one-off file fetch, never proxy traffic through another tool.
 pub async fn ensure_xray_binary() -> Result<PathBuf, String> {
     if let Ok(p) = resolve_xray_binary() {
         return Ok(p);
@@ -164,19 +191,12 @@ pub async fn ensure_xray_binary() -> Result<PathBuf, String> {
     let asset = super::xray_binary::asset_for_target(triple)
         .ok_or_else(|| format!("no pinned Xray asset for target {triple}"))?;
     let url = super::xray_binary::download_url(&asset);
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .build()
-        .map_err(|e| format!("failed to build download client: {e}"))?;
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| format!("failed to download Xray {triple}: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("failed to download Xray {triple}: HTTP {}", resp.status()));
-    }
-    let bytes = resp.bytes().await.map_err(|e| format!("failed to read Xray download: {e}"))?;
+    let bytes = match fetch_archive(&url, true).await {
+        Ok(b) => b,
+        Err(direct_err) => fetch_archive(&url, false).await.map_err(|proxy_err| {
+            format!("failed to download Xray {triple}: direct failed ({direct_err}); via system proxy also failed ({proxy_err})")
+        })?,
+    };
     {
         use sha2::Digest;
         let actual = format!("{:x}", sha2::Sha256::digest(&bytes));
