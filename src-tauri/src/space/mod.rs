@@ -1203,15 +1203,47 @@ mod tests {
 /// Xray sidecar launch facade (Module 4). The local modules stay private
 /// to `space`; launch.rs goes through this facade, like `space::proxy`.
 pub mod xray {
-    use super::local::xray_launch as local;
-    pub use local::{local_proxy_entry, local_proxy_server_arg, resolve_xray_binary, xray_running_for};
+    use super::local::xray_import as import;
+    use super::local::xray_launch as launch;
+    use anyhow::Result;
+    pub use import::XrayImportResult;
+    pub use launch::{local_proxy_entry, local_proxy_server_arg, resolve_xray_binary, xray_running_for};
     pub fn start_for_profile(profile_id: &str, link: &str) -> Result<super::proxy::ProxyEntry, String> {
-        local::start_xray_for_profile(profile_id, link)
+        launch::start_xray_for_profile(profile_id, link)
     }
     pub fn stop_for_profile(profile_id: &str) {
-        local::stop_xray_for_profile(profile_id);
+        launch::stop_xray_for_profile(profile_id);
     }
     pub fn running_for(profile_id: &str) -> bool {
-        local::xray_running_for(profile_id)
+        launch::xray_running_for(profile_id)
+    }
+    /// Parse bulk-import text without saving; per-line results, no credentials.
+    pub fn bulk_parse(text: &str) -> Vec<XrayImportResult> {
+        import::import_lines(text)
+    }
+    /// Bind an Xray share link to a personal profile (Module 5). Team
+    /// profiles are refused: Xray binding is personal-space only.
+    pub fn bind_to_profile(profile_id: &str, link: &str) -> Result<String> {
+        super::personal_only()?;
+        let mut stored = super::profile::load_raw(profile_id)?;
+        let masked = import::bind_link(&mut stored, link).map_err(anyhow::Error::msg)?;
+        super::local::profile::save_raw(&mut stored)?;
+        Ok(masked)
+    }
+    pub fn unbind_from_profile(profile_id: &str) -> Result<()> {
+        super::personal_only()?;
+        let mut stored = super::profile::load_raw(profile_id)?;
+        import::unbind_link(&mut stored);
+        super::local::profile::save_raw(&mut stored)?;
+        Ok(())
+    }
+    /// Test a share link through a temporary Xray sidecar: start it, run
+    /// the existing proxy test against its LOCAL port (so the reported
+    /// exit IP / country are the upstream's, never 127.0.0.1), stop it.
+    pub async fn test_link(link: &str) -> Result<super::proxy::TestSnapshot> {
+        let entry = launch::start_xray_for_profile("xray-test", link).map_err(anyhow::Error::msg)?;
+        let result = super::proxy::full_test(&entry).await;
+        launch::stop_xray_for_profile("xray-test");
+        result
     }
 }
