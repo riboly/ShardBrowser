@@ -158,7 +158,7 @@ pub fn resolve_xray_binary() -> Result<PathBuf, String> {
 
 /// One download attempt: direct when `direct` is set, otherwise
 /// through whatever proxy the system environment names.
-async fn fetch_archive(url: &str, direct: bool) -> Result<bytes::Bytes, String> {
+async fn fetch_archive(url: &str, direct: bool) -> Result<Vec<u8>, String> {
     let builder = reqwest::Client::builder();
     let builder = if direct { builder.no_proxy() } else { builder };
     let client = builder
@@ -172,7 +172,9 @@ async fn fetch_archive(url: &str, direct: bool) -> Result<bytes::Bytes, String> 
     if !resp.status().is_success() {
         return Err(format!("failed to download Xray: HTTP {}", resp.status()));
     }
-    resp.bytes().await.map_err(|e| format!("failed to read Xray download: {e}"))
+    // Vec, not bytes::Bytes: naming that type would need `bytes` as a
+    // direct dependency, and it is only in the tree via reqwest.
+    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| format!("failed to read Xray download: {e}"))
 }
 
 /// Ensure a pinned sidecar exists, downloading it on first use when
@@ -204,7 +206,7 @@ pub async fn ensure_xray_binary() -> Result<PathBuf, String> {
             return Err("Xray download checksum mismatch; refusing to run it".to_string());
         }
     }
-    let reader = std::io::Cursor::new(bytes.to_vec());
+    let reader = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("bad Xray archive: {e}"))?;
     let want = if cfg!(windows) { "xray.exe" } else { "xray" };
     let mut found: Option<Vec<u8>> = None;
