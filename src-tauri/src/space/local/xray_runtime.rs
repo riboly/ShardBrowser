@@ -181,12 +181,50 @@ fn outbound(link: &ParsedShareLink) -> Value {
             }] },
             "tag": "proxy",
         }),
-        XrayProtocol::Hysteria2 => json!({
-            "protocol": "hysteria2",
-            "settings": { "servers": [{ "address": link.host, "port": link.port, "password": link.credential }] },
-            "streamSettings": stream,
-            "tag": "proxy",
-        }),
+        XrayProtocol::Hysteria2 => {
+            // Xray's Hysteria2 is protocol "hysteria" with version 2, not
+            // "hysteria2": the latter is not a protocol Xray knows, so a
+            // config built with it fails to load and the sidecar exits
+            // before it ever dials. TLS and auth live in streamSettings,
+            // not in settings: tlsSettings carries SNI/ALPN/pin, and
+            // hysteriaSettings carries the password as `auth`.
+            let qp = &link.params;
+            let mut tls = Map::new();
+            tls.insert(
+                "serverName".to_string(),
+                json!(qp.get("sni").cloned().unwrap_or_else(|| link.host.clone())),
+            );
+            let alpn: Vec<&str> = qp
+                .get("alpn")
+                .map(|a| a.split(',').map(str::trim).filter(|s| !s.is_empty()).collect())
+                .unwrap_or_else(|| vec!["h3"]);
+            tls.insert("alpn".to_string(), json!(alpn));
+            if matches!(qp.get("insecure").map(|s| s.as_str()), Some("1") | Some("true")) {
+                tls.insert("allowInsecure".to_string(), json!(true));
+            }
+            if let Some(pin) = qp.get("pinSHA256") {
+                // Xray hex-decodes this at config load: anything but
+                // exactly 64 hex chars fails the whole config, so a bad
+                // value is left out rather than breaking the node.
+                if pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    tls.insert("pinnedPeerCertSha256".to_string(), json!(pin));
+                }
+            }
+            let mut hyst = Map::new();
+            hyst.insert("version".to_string(), json!(2));
+            hyst.insert("auth".to_string(), json!(link.credential));
+            json!({
+                "protocol": "hysteria",
+                "settings": { "version": 2, "address": link.host, "port": link.port },
+                "streamSettings": {
+                    "network": "hysteria",
+                    "security": "tls",
+                    "tlsSettings": Value::Object(tls),
+                    "hysteriaSettings": Value::Object(hyst),
+                },
+                "tag": "proxy",
+            })
+        }
     }
 }
 
@@ -449,11 +487,33 @@ mod tests {
     }
 
     #[test]
+    fn hysteria2_config_shape() {
+        // The shape a real hy2 link (SNI, insecure, cert pin) must land in.
+        let pin = "0123456789abcdef".repeat(4);
+        let link = format!(
+            "hysteria2://testpass@example.invalid:443?sni=sni.invalid&insecure=1&pinSHA256={pin}#h"
+        );
+        let parsed = parse_share_link(&link).unwrap();
+        let cfg = build_client_config(&parsed, 18082);
+        let out = &cfg["outbounds"][0];
+        assert_eq!(out["protocol"], "hysteria");
+        assert_eq!(out["settings"]["version"], 2);
+        assert_eq!(out["settings"]["address"], "example.invalid");
+        assert_eq!(out["streamSettings"]["network"], "hysteria");
+        assert_eq!(out["streamSettings"]["tlsSettings"]["serverName"], "sni.invalid");
+        assert_eq!(out["streamSettings"]["tlsSettings"]["alpn"][0], "h3");
+        assert_eq!(out["streamSettings"]["tlsSettings"]["allowInsecure"], true);
+        assert_eq!(out["streamSettings"]["tlsSettings"]["pinnedPeerCertSha256"], pin);
+        assert_eq!(out["streamSettings"]["hysteriaSettings"]["version"], 2);
+        assert_eq!(out["streamSettings"]["hysteriaSettings"]["auth"], "testpass");
+    }
+
+    #[test]
     fn config_covers_all_protocols() {
         let cases = [
             ("trojan://pass@example.invalid:443#t", "trojan"),
             ("ss://YWVzLTI1Ni1nY206cGFzcw==@example.invalid:8388#s", "shadowsocks"),
-            ("hysteria2://pass@example.invalid:443#h", "hysteria2"),
+            ("hysteria2://pass@example.invalid:443#h", "hysteria"),
         ];
         for (link, protocol) in cases {
             let parsed = parse_share_link(link).unwrap();
