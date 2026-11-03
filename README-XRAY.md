@@ -146,6 +146,23 @@ AI maintenance limits (state this honestly to the user, every time):
   and report. What AI CANNOT do alone: push without approval, resolve a
   contract-changing conflict by guessing, or upgrade Xray version silently.
 
+## 2026-11-03 (evening): hy2 test failure, root cause in the log
+
+The test sidecar's own log said it plainly: Xray 26.3.27 refuses
+`allowInsecure` at config load ("removed and migrated to
+pinnedPeerCertSha256"). The launcher emitted `allowInsecure: true`
+for any hy2 link with `insecure=1`, so the sidecar died at once and
+the health check burned the full 30 s on a dead process, which is
+why the test showed a generic timeout. Fixed: no `allowInsecure`
+is emitted at all; a link's `insecure=1` is honoured only through
+its `pinSHA256` (the pin replaces CA verification). A link with
+`insecure=1` and no pin gets plain CA verification — 26.3.27
+offers no other skip. The health check now also fails at once when
+the sidecar exits during startup, with its exit status, instead of
+waiting out the timeout. The sidecar spawn and the `xray version`
+probe both set CREATE_NO_WINDOW on Windows, so no black console
+window pops up on profile start.
+
 ## Current status
 
 - 2026-11-03: Fork created (riboly/ShardBrowser), branch feature/xray-proxy
