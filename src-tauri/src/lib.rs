@@ -1587,6 +1587,29 @@ fn proxy_bulk_parse(text: String, kind: String) -> Vec<space::proxy::ProxyEntry>
     space::proxy::parse_bulk(&text, default_kind)
 }
 
+/// Xray share links (Module 5): parse bulk text without saving.
+#[tauri::command]
+fn xray_bulk_parse(text: String) -> Vec<space::xray::XrayImportResult> {
+    space::xray::bulk_parse(&text)
+}
+
+/// Bind an Xray share link to a personal profile; returns masked display.
+#[tauri::command]
+fn xray_bind_to_profile(profile_id: String, link: String) -> Result<String, String> {
+    space::xray::bind_to_profile(&profile_id, &link).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn xray_unbind_from_profile(profile_id: String) -> Result<(), String> {
+    space::xray::unbind_from_profile(&profile_id).map_err(|e| e.to_string())
+}
+
+/// Test a share link through a temporary Xray sidecar (local port).
+#[tauri::command]
+async fn xray_test_link(link: String) -> Result<space::proxy::TestSnapshot, String> {
+    space::xray::test_link(&link).await.map_err(|e| e.to_string())
+}
+
 /// Persist pre-tested proxies (bulk dialog).
 #[tauri::command]
 async fn proxy_bulk_save(entries: Vec<space::proxy::ProxyEntry>, epoch: Option<u64>) -> Result<usize, String> {
@@ -2717,6 +2740,10 @@ pub fn run() {
             proxy_last_test,
             proxy_bulk_import,
             proxy_bulk_parse,
+            xray_bulk_parse,
+            xray_bind_to_profile,
+            xray_unbind_from_profile,
+            xray_test_link,
             proxy_bulk_save,
             launch,
             settings_get,
