@@ -725,7 +725,9 @@ struct AddProxyReq {
     username: Option<String>,
     password: Option<String>,
     name: Option<String>,
-    xray_link: None,
+    /// Full Xray share link for a kind-xray proxy added by fields
+    /// (the `proxy` string still wins over fields when both given).
+    xray_link: Option<String>,
     country: Option<String>,
     notes: Option<String>,
 }
@@ -761,6 +763,15 @@ async fn add_proxy(Extension(t): Extension<Ticket>, Json(body): Json<AddProxyReq
             notes: String::new(),
         }
     };
+    // An Xray link given by fields makes this an Xray entry; upsert
+    // derives its host/port from the link, so the fields path needs
+    // no host/port of its own for one.
+    if body.proxy.is_none() {
+        if let Some(link) = body.xray_link.clone().filter(|s| !s.trim().is_empty()) {
+            entry.kind = crate::space::proxy::ProxyKind::Xray;
+            entry.xray_link = Some(link);
+        }
+    }
     // metadata overrides (applied to parsed entries too).
     if let Some(n) = body.name.filter(|s| !s.is_empty()) {
         entry.name = n;
