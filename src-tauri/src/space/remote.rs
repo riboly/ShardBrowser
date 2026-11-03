@@ -210,6 +210,7 @@ pub fn proxy(row: &ProxyRow, login: Option<&str>) -> ProxyEntry {
         port: 0,
         username: String::new(),
         password: String::new(),
+        xray_link: None,
         country: String::new(),
         notes: String::new(),
     });
@@ -378,6 +379,7 @@ pub fn proxy_row_after(w: &Written) -> ProxyRow {
         id: w.id.clone(),
         name: w.name.clone(),
         kind: w.kind.clone(),
+        xray_link: None,
         country: w.country.clone(),
         revision: w.revision,
         updated_at: w.updated_at,
