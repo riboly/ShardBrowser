@@ -168,22 +168,32 @@ pub(in crate::space) fn list() -> Result<Vec<ProxyEntry>> {
     Ok(load()?.proxies)
 }
 
-pub(in crate::space) fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
-    if entry.kind == ProxyKind::Xray {
-        if let Some(link) = entry.xray_link.clone() {
-            let parsed = super::xray_share::parse_share_link(&link)
-                .map_err(|e| anyhow::anyhow!("invalid Xray share link: {e}"))?;
-            entry.host = parsed.host.clone();
-            entry.port = parsed.port;
-            if entry.name.is_empty() {
-                entry.name = if parsed.name.is_empty() { format!("{}:{}", parsed.host, parsed.port) } else { parsed.name.clone() };
-            }
-            entry.username.clear();
-            entry.password.clear();
-        } else {
-            return Err(anyhow::anyhow!("Xray proxy needs a share link"));
-        }
+/// An Xray entry's listable fields come from its link: the edit
+/// dialog, the API and the bulk importer all send the link and let
+/// this derive host/port (and a name, when none was given). Every
+/// door that stores an entry runs this first, so no door can store
+/// an Xray entry with a stale or empty endpoint.
+fn normalise_xray(entry: &mut ProxyEntry) -> Result<()> {
+    if entry.kind != ProxyKind::Xray {
+        return Ok(());
     }
+    let Some(link) = entry.xray_link.clone() else {
+        return Err(anyhow::anyhow!("Xray proxy needs a share link"));
+    };
+    let parsed = super::xray_share::parse_share_link(&link)
+        .map_err(|e| anyhow::anyhow!("invalid Xray share link: {e}"))?;
+    entry.host = parsed.host.clone();
+    entry.port = parsed.port;
+    if entry.name.is_empty() {
+        entry.name = if parsed.name.is_empty() { format!("{}:{}", parsed.host, parsed.port) } else { parsed.name.clone() };
+    }
+    entry.username.clear();
+    entry.password.clear();
+    Ok(())
+}
+
+pub(in crate::space) fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+    normalise_xray(&mut entry)?;
     if entry.id.is_empty() {
         entry.id = uuid::Uuid::new_v4().to_string();
     }
@@ -200,6 +210,7 @@ pub(in crate::space) fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
 /// Upsert that reuses an identical entry (`same_proxy`): one with the same
 /// endpoint and user but another password is a proxy of its own.
 pub(in crate::space) fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+    normalise_xray(&mut entry)?;
     let mut s = load()?;
     if let Some(existing) = s.proxies.iter().find(|p| p.same_proxy(&entry)) {
         return Ok(existing.clone());
@@ -224,6 +235,7 @@ pub(in crate::space) fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry
 /// separate door, opened only when the caller names the profile the proxy
 /// belongs to.
 pub(in crate::space) fn upsert_for_binding(mut entry: ProxyEntry, bound_id: Option<&str>) -> Result<ProxyEntry> {
+    normalise_xray(&mut entry)?;
     let mut s = load()?;
     if let Some(existing) = s.proxies.iter().find(|p| p.same_proxy(&entry)) {
         return Ok(existing.clone());
@@ -403,6 +415,14 @@ async fn probe_inner(entry: &ProxyEntry) -> Result<u128> {
         .context("connect timeout")??;
 
     match entry.kind {
+        // An Xray entry is never probed directly: its test and launch
+        // paths start a local sidecar first and probe the local SOCKS5
+        // entry. Reaching here with one means a caller forgot that
+        // step; fail closed rather than dialling the upstream as if
+        // it were a plain proxy.
+        ProxyKind::Xray => {
+            anyhow::bail!("Xray entries are probed through their local sidecar, not directly");
+        }
         ProxyKind::Socks5 => {
             socks5_handshake(&mut stream, entry).await?;
 
@@ -965,6 +985,10 @@ async fn geo_check_one(entry: Option<&ProxyEntry>, provider: &str) -> Result<Geo
             ProxyKind::Socks5 => "socks5h", // DNS via proxy
             ProxyKind::Http => "http",
             ProxyKind::Https => "https",
+            // Geo for an Xray entry runs through its local sidecar
+            // (see full_test); a direct geo request here would both
+            // fail and leak the host address, so refuse it outright.
+            ProxyKind::Xray => anyhow::bail!("Xray entries are geo-checked through their local sidecar, not directly"),
         };
         let proxy_url = if entry.username.is_empty() && entry.password.is_empty() {
             format!("{scheme}://{}:{}", entry.host, entry.port)
