@@ -103,7 +103,7 @@ export function XrayRow({ bound, unbinding, newLink, onNewLink, onUnbind }: {
             aria-label={t("profileForm.xrayLinkLabel")}
             value={newLink}
             onChange={(e) => { onNewLink(e.target.value); setParsed(null); setTested(null); setError(null); }}
-            placeholder="vless://… / vmess://… / trojan://… / ss://… / hysteria2://…"
+            placeholder={t("profileForm.xrayPlaceholder")}
           />
           <div className="flex items-center gap-2">
             <Button variant="neutral" mode="ghost" size="3xsmall" disabled={!newLink.trim() || parsing} onClick={parse}>
@@ -114,7 +114,7 @@ export function XrayRow({ bound, unbinding, newLink, onNewLink, onUnbind }: {
             </Button>
             {parsed?.ok && (
               <span className="min-w-0 truncate text-secondary">
-                {parsed.name ? `${parsed.name} · ` : ""}{parsed.protocol} · {parsed.masked}
+                {parsed.name ? `${parsed.name}, ` : ""}{parsed.protocol}, {parsed.masked}
               </span>
             )}
           </div>

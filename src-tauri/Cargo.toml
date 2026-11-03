@@ -27,7 +27,6 @@ tower = { version = "0.5", features = ["util"] }
 shardbrowser-team-server = { path = "../team-server" }
 # Team keys made per test, as the team server makes them.
 ed25519-dalek = { version = "2", features = ["pkcs8", "rand_core"] }
-rand = "0.8"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -57,6 +56,11 @@ serde_json = "1"
 team-model = { path = "../crates/team-model" }
 tokio = { version = "1", features = ["process", "rt-multi-thread", "macros", "fs", "net", "io-util", "time", "sync"] }
 anyhow = "1"
+# Production use, not test-only: the Xray sidecar's random local SOCKS
+# credentials (xray_runtime.rs). It used to live in [dev-dependencies]
+# only, which is why `cargo test` passed and the Release build failed
+# with E0432/E0433 on `use rand::Rng`.
+rand = "0.8"
 dirs = "5"
 # The host's IANA zone name on every OS. Windows keeps its own names, so
 # reading /etc/localtime or $TZ there found nothing and every fallback said UTC.

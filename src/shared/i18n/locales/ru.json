@@ -1725,6 +1725,7 @@
   "profileForm.xrayTestOk": "Выход {ip} ({country} {city}), {ms} мс",
   "profileForm.xrayHelp": "Каждый профиль привязывает свой узел Xray; привязка сбрасывает обычный прокси, а запуск идёт через локальный SOCKS5 этого узла. Ссылка хранится только в локальном профиле, а форма показывает только протокол и адрес, но не полную ссылку.",
   "profileForm.xrayFailed": "Не удалось привязать узел Xray. Ваши изменения сохранены здесь.",
+  "profileForm.xrayPlaceholder": "vless://…, vmess://…, trojan://…, ss://…, hysteria2://…",
   "profileForm.proxyLineLabel": "Строка прокси",
   "profileForm.reload": "Перезагрузить",
   "profileForm.save": "Сохранить",

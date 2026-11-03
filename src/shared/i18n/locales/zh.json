@@ -1725,6 +1725,7 @@
   "profileForm.xrayTestOk": "出口 {ip}（{country} {city}），{ms} ms",
   "profileForm.xrayHelp": "每个配置独立绑定一个 Xray 节点；绑定后普通代理会被清除，启动时走该节点的本地 SOCKS5。链接只存于本机配置，界面只显示协议和地址，不显示完整链接。",
   "profileForm.xrayFailed": "无法绑定 Xray 节点。你的更改仍保留在这里。",
+  "profileForm.xrayPlaceholder": "vless://…、vmess://…、trojan://…、ss://…、hysteria2://…",
   "profileForm.proxyLineLabel": "代理行",
   "profileForm.reload": "重新加载",
   "profileForm.save": "保存",
