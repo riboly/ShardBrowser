@@ -199,9 +199,14 @@ fn outbound(link: &ParsedShareLink) -> Value {
                 .map(|a| a.split(',').map(str::trim).filter(|s| !s.is_empty()).collect())
                 .unwrap_or_else(|| vec!["h3"]);
             tls.insert("alpn".to_string(), json!(alpn));
-            if matches!(qp.get("insecure").map(|s| s.as_str()), Some("1") | Some("true")) {
-                tls.insert("allowInsecure".to_string(), json!(true));
-            }
+            // No allowInsecure here: Xray 26.3.27 refuses it at config
+            // load ("removed and migrated to pinnedPeerCertSha256"), so
+            // emitting it killed the sidecar before it ever dialled.
+            // A link's insecure=1 is honoured only through its pin: the
+            // pin replaces CA verification for that certificate. A link
+            // with insecure=1 and no pin gets plain CA verification —
+            // 26.3.27 offers no other skip, and inventing one would be
+            // a config Xray rejects anyway.
             if let Some(pin) = qp.get("pinSHA256") {
                 // Xray hex-decodes this at config load: anything but
                 // exactly 64 hex chars fails the whole config, so a bad
@@ -310,36 +315,65 @@ pub fn wait_for_port(port: u16, timeout: Duration) -> bool {
 /// nothing — another process could own the port, or Xray could still be
 /// loading. Do the SOCKS5 handshake with the local credentials and only
 /// return true when Xray itself answers the auth.
-pub fn wait_for_socks_auth(port: u16, user: &str, pass: &str, timeout: Duration) -> bool {
+fn try_socks_auth_once(port: u16, user: &str, pass: &str) -> bool {
     use std::io::{Read, Write};
+    let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+    if stream.write_all(&[5, 1, 2]).is_err() {
+        return false;
+    }
+    let mut method = [0u8; 2];
+    if stream.read_exact(&mut method).is_err() || method != [5, 2] {
+        return false;
+    }
+    let mut auth = vec![1, user.len() as u8];
+    auth.extend_from_slice(user.as_bytes());
+    auth.push(pass.len() as u8);
+    auth.extend_from_slice(pass.as_bytes());
+    if stream.write_all(&auth).is_err() {
+        return false;
+    }
+    let mut resp = [0u8; 2];
+    stream.read_exact(&mut resp).is_ok() && resp == [1, 0]
+}
+
+pub fn wait_for_socks_auth(port: u16, user: &str, pass: &str, timeout: Duration) -> bool {
     let start = Instant::now();
     while start.elapsed() < timeout {
-        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
-            let mut ok = false;
-            if stream.write_all(&[5, 1, 2]).is_ok() {
-                let mut method = [0u8; 2];
-                if stream.read_exact(&mut method).is_ok() && method == [5, 2] {
-                    let mut auth = vec![1, user.len() as u8];
-                    auth.extend_from_slice(user.as_bytes());
-                    auth.push(pass.len() as u8);
-                    auth.extend_from_slice(pass.as_bytes());
-                    if stream.write_all(&auth).is_ok() {
-                        let mut resp = [0u8; 2];
-                        if stream.read_exact(&mut resp).is_ok() && resp == [1, 0] {
-                            ok = true;
-                        }
-                    }
-                }
-            }
-            if ok {
-                return true;
-            }
+        if try_socks_auth_once(port, user, pass) {
+            return true;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     false
+}
+
+/// The startup wait, but a dead sidecar ends it at once with its exit
+/// status instead of burning the whole timeout on a process that will
+/// never answer.
+pub fn wait_for_socks_auth_or_exit(
+    port: u16,
+    user: &str,
+    pass: &str,
+    timeout: Duration,
+    child: &mut Child,
+) -> Result<(), String> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if try_socks_auth_once(port, user, pass) {
+            return Ok(());
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!("Xray exited during startup (status: {status})"));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(format!(
+        "Xray did not answer SOCKS auth on 127.0.0.1:{port} within {timeout:?}"
+    ))
 }
 
 pub struct XraySidecar {
@@ -373,25 +407,39 @@ impl XraySidecar {
         let log_file2 = log_file
             .try_clone()
             .map_err(|e| format!("failed to clone Xray log handle: {e}"))?;
-        let mut child = Command::new(binary_path)
-            .arg("-c")
+        let mut cmd = Command::new(binary_path);
+        cmd.arg("-c")
             .arg(&config_path)
             .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(log_file2))
+            .stderr(Stdio::from(log_file2));
+        #[cfg(target_os = "windows")]
+        {
+            // The sidecar is a console program: without this, every
+            // profile start flashes a black console window.
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| {
                 let _ = fs::remove_file(&config_path);
                 format!("failed to start Xray ({}): {e}", link.masked_display())
             })?;
         let _ = fs::write(pid_path(profile_id), child.id().to_string());
-        if !wait_for_socks_auth(local_port, &local_user, &local_pass, XRAY_HEALTH_TIMEOUT) {
+        // A bad config kills the sidecar at once; waiting out the full
+        // 30 s for a dead process is what made the last failure look
+        // like a network timeout. Fail on the exit itself instead.
+        if let Err(e) = wait_for_socks_auth_or_exit(
+            local_port,
+            &local_user,
+            &local_pass,
+            XRAY_HEALTH_TIMEOUT,
+            &mut child,
+        ) {
             let _ = child.kill();
             let _ = child.wait();
             let _ = fs::remove_file(&config_path);
-            return Err(format!(
-                "Xray did not answer SOCKS auth on 127.0.0.1:{} within {:?}; see log {}",
-                local_port, XRAY_HEALTH_TIMEOUT, log_path.display()
-            ));
+            return Err(format!("{e}; see log {}", log_path.display()));
         }
         Ok(Self {
             profile_id: profile_id.to_string(),
@@ -502,10 +550,23 @@ mod tests {
         assert_eq!(out["streamSettings"]["network"], "hysteria");
         assert_eq!(out["streamSettings"]["tlsSettings"]["serverName"], "sni.invalid");
         assert_eq!(out["streamSettings"]["tlsSettings"]["alpn"][0], "h3");
-        assert_eq!(out["streamSettings"]["tlsSettings"]["allowInsecure"], true);
+        assert!(out["streamSettings"]["tlsSettings"]["allowInsecure"].is_null());
         assert_eq!(out["streamSettings"]["tlsSettings"]["pinnedPeerCertSha256"], pin);
         assert_eq!(out["streamSettings"]["hysteriaSettings"]["version"], 2);
         assert_eq!(out["streamSettings"]["hysteriaSettings"]["auth"], "testpass");
+    }
+
+    #[test]
+    fn hysteria2_insecure_without_pin_gets_no_skip() {
+        // insecure=1 without a pin cannot be expressed in 26.3.27:
+        // allowInsecure is gone, and there is nothing to pin to.
+        let parsed =
+            parse_share_link("hysteria2://testpass@example.invalid:443?insecure=1#h").unwrap();
+        let cfg = build_client_config(&parsed, 18084);
+        let tls = &cfg["outbounds"][0]["streamSettings"]["tlsSettings"];
+        assert!(tls["allowInsecure"].is_null());
+        assert!(tls["pinnedPeerCertSha256"].is_null());
+        assert_eq!(tls["serverName"], "example.invalid");
     }
 
     #[test]
