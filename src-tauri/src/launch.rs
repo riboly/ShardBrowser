@@ -556,6 +556,30 @@ struct Ready<'a> {
 }
 
 async fn start_browser(bin: &Path, input: LaunchInput, opts: &LaunchOpts<'_>) -> Result<LaunchOutcome> {
+    // Xray profile (Module 4): start the sidecar first, then let every
+    // existing step below (UDP probe, geo check, --proxy-server arg,
+    // QUIC / WebRTC gating) work on its local SOCKS5 entry. On failure,
+    // fail closed: do not launch the profile at all.
+    let mut input = input;
+    if let Some(link) = input.stored.meta.xray_link.clone() {
+        match crate::space::xray::start_for_profile(&input.profile_id, &link) {
+            Ok(local) => {
+                eprintln!(
+                    "[launcher] Xray started for profile {} on {}",
+                    input.profile_id,
+                    local.to_proxy_server_arg()
+                );
+                input.proxy = Some(local);
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Xray failed to start for profile {}: {e} — profile not launched",
+                    input.profile_id
+                ));
+            }
+        }
+    }
+
     // Read off the engine binary while the proxy is probed; once per engine version.
     let ext_alone = (!input.extensions.is_empty() || input.library.is_some()).then(|| {
         let bin = bin.to_path_buf();
@@ -765,6 +789,18 @@ async fn start_browser(bin: &Path, input: LaunchInput, opts: &LaunchOpts<'_>) ->
         None => (cmd.spawn().context("start the ShardBrowser engine")?, process::Tie::default()),
     };
     let pid = Tracker::shared().track(profile_id.clone(), child, udd.clone(), exit, ext_ids);
+    if crate::space::xray::running_for(&profile_id) {
+        let watch_id = profile_id.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if !Tracker::shared().is_running(&watch_id) {
+                    crate::space::xray::stop_for_profile(&watch_id);
+                    break;
+                }
+            }
+        });
+    }
 
     if let Some(s) = &remote {
         s.spawned(tie, pid);
