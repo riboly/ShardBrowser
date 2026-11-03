@@ -379,7 +379,6 @@ pub fn proxy_row_after(w: &Written) -> ProxyRow {
         id: w.id.clone(),
         name: w.name.clone(),
         kind: w.kind.clone(),
-        xray_link: None,
         country: w.country.clone(),
         revision: w.revision,
         updated_at: w.updated_at,
