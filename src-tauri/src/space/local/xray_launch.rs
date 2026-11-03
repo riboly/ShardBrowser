@@ -48,6 +48,7 @@ pub fn local_proxy_entry(local_port: u16, username: &str, password: &str) -> Pro
         port: local_port,
         username: username.to_string(),
         password: password.to_string(),
+        xray_link: None,
         country: String::new(),
         notes: String::new(),
     }
@@ -59,58 +60,164 @@ pub fn local_proxy_server_arg(local_port: u16) -> String {
     format!("socks5://127.0.0.1:{local_port}")
 }
 
-/// Resolve the Xray sidecar binary: explicit env override first, then
-/// next to the launcher executable, then the dev checkout layout.
-/// Tauri packages sidecars next to the app binary; the dev fallback is
-/// only for running from a source checkout.
-pub fn resolve_xray_binary() -> Result<PathBuf, String> {
-    if let Ok(p) = std::env::var("SHARD_XRAY_BIN") {
-        let pb = PathBuf::from(&p);
-        if pb.exists() {
-            return Ok(pb);
+/// Where a downloaded sidecar lives when no bundled one is found
+/// (a portable copy has no bundle). The launcher's own data dir, never
+/// v2rayN's or any other tool's folder: this launcher must not read,
+/// write or run another tool's Xray, and must not be mistaken for it.
+fn downloaded_dir() -> PathBuf {
+    let base = dirs::data_dir()
+        .or_else(dirs::data_local_dir)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("shardbrowser-xray")
+}
+
+/// The host's Rust target triple, for the pinned asset table.
+fn host_triple() -> Option<&'static str> {
+    if cfg!(target_os = "windows") {
+        Some("x86_64-pc-windows-msvc")
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "aarch64") {
+            Some("aarch64-apple-darwin")
+        } else {
+            Some("x86_64-apple-darwin")
         }
-        return Err(format!("SHARD_XRAY_BIN points to a missing file: {p}"));
+    } else if cfg!(target_arch = "aarch64") {
+        Some("aarch64-unknown-linux-gnu")
+    } else {
+        Some("x86_64-unknown-linux-gnu")
     }
-    let target = std::env::consts::ARCH;
-    let _ = target;
-    // Rust target triple is not std::env::consts; use the host triple via
-    // the download script's naming for the common cases, and fall back to
-    // scanning the binaries dir for any xray-* file.
-    let mut candidates = Vec::new();
+}
+
+/// A binary is ours only if it reports the pinned Xray version. This
+/// is the v2rayN guard: a user who already runs v2rayN has an xray.exe
+/// of its own, possibly in a folder this launcher also looks in. A
+/// different version is never run as this launcher's sidecar, whatever
+/// its name; the pinned one is downloaded instead.
+fn binary_version_ok(path: &PathBuf) -> bool {
+    let Ok(out) = std::process::Command::new(path).arg("version").output() else {
+        return false;
+    };
+    let text = String::from_utf8_lossy(&out.stdout);
+    out.status.success() && text.starts_with("Xray ") && text.contains(super::xray_binary::XRAY_VERSION)
+}
+
+/// Candidate binaries, most launcher-controlled first: an env override,
+/// a previously downloaded one, the dev checkout, then the bundled
+/// sidecar next to the app. Tauri bundles the sidecar under its bare
+/// name (`xray.exe`) next to the app binary — the previous lookup only
+/// accepted `xray-<triple>.exe`, which is why an installed build
+/// reported "binary not found" while the file was right there.
+fn candidate_paths() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(p) = std::env::var("SHARD_XRAY_BIN") {
+        out.push(PathBuf::from(p));
+    }
+    if let Some(triple) = host_triple() {
+        out.push(downloaded_dir().join(super::xray_binary::sidecar_binary_name(triple)));
+    }
+    let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            candidates.push(dir.join("binaries"));
-            candidates.push(dir.to_path_buf());
+            dirs.push(dir.join("binaries"));
+            dirs.push(dir.to_path_buf());
         }
     }
-    candidates.push(PathBuf::from("src-tauri/binaries"));
-    for dir in candidates {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with("xray-") && !name.ends_with(".json") && !name.ends_with(".txt") {
-                    return Ok(entry.path());
-                }
-            }
-        }
-        // Also try the exact sidecar name for this platform's common triple.
+    dirs.push(PathBuf::from("src-tauri/binaries"));
+    let bare = if cfg!(windows) { "xray.exe" } else { "xray" };
+    for dir in &dirs {
         for triple in ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "aarch64-unknown-linux-gnu"] {
-            let p = dir.join(sidecar_binary_name(triple));
-            if p.exists() {
-                return Ok(p);
-            }
+            out.push(dir.join(super::xray_binary::sidecar_binary_name(triple)));
+        }
+        out.push(dir.join(bare));
+    }
+    out
+}
+
+/// Resolve the Xray sidecar binary: explicit env override first, then
+/// the launcher's own download dir, then next to the launcher
+/// executable, then the dev checkout layout. A candidate counts only
+/// if it exists and reports the pinned version.
+pub fn resolve_xray_binary() -> Result<PathBuf, String> {
+    for cand in candidate_paths() {
+        if cand.exists() && binary_version_ok(&cand) {
+            return Ok(cand);
         }
     }
     Err(
-        "Xray sidecar binary not found. Run `node src-tauri/tools/download-xray.mjs` \
-         first, or set SHARD_XRAY_BIN to the binary path."
+        "Xray sidecar binary not found. Run `node src-tauri/tools/download-xray.mjs`          first, or set SHARD_XRAY_BIN to the binary path."
             .to_string(),
     )
 }
 
-pub fn start_xray_for_profile(profile_id: &str, link: &str) -> Result<ProxyEntry, String> {
+/// Ensure a pinned sidecar exists, downloading it on first use when
+/// no bundled one is found (the portable copy's case). The archive is
+/// verified by SHA256 in memory before anything is written, only the
+/// `xray` binary is extracted, and it is version-checked before use.
+/// Download goes direct, never through a local proxy: routing it
+/// through v2rayN's own inbound would make this launcher depend on
+/// the very tool it must not conflict with.
+pub async fn ensure_xray_binary() -> Result<PathBuf, String> {
+    if let Ok(p) = resolve_xray_binary() {
+        return Ok(p);
+    }
+    let triple = host_triple().ok_or_else(|| "no pinned Xray asset for this platform".to_string())?;
+    let asset = super::xray_binary::asset_for_target(triple)
+        .ok_or_else(|| format!("no pinned Xray asset for target {triple}"))?;
+    let url = super::xray_binary::download_url(&asset);
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .map_err(|e| format!("failed to build download client: {e}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("failed to download Xray {triple}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("failed to download Xray {triple}: HTTP {}", resp.status()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("failed to read Xray download: {e}"))?;
+    {
+        use sha2::Digest;
+        let actual = format!("{:x}", sha2::Sha256::digest(&bytes));
+        if actual != asset.sha256 {
+            return Err("Xray download checksum mismatch; refusing to run it".to_string());
+        }
+    }
+    let reader = std::io::Cursor::new(bytes.to_vec());
+    let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("bad Xray archive: {e}"))?;
+    let want = if cfg!(windows) { "xray.exe" } else { "xray" };
+    let mut found: Option<Vec<u8>> = None;
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i).map_err(|e| format!("bad Xray archive entry: {e}"))?;
+        if entry.name() == want {
+            let mut buf = Vec::new();
+            use std::io::Read;
+            entry.read_to_end(&mut buf).map_err(|e| format!("failed to extract Xray: {e}"))?;
+            found = Some(buf);
+            break;
+        }
+    }
+    let bin = found.ok_or_else(|| format!("Xray archive has no {want} binary"))?;
+    let dir = downloaded_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create Xray dir: {e}"))?;
+    let dest = dir.join(super::xray_binary::sidecar_binary_name(triple));
+    std::fs::write(&dest, &bin).map_err(|e| format!("failed to write Xray binary: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+    }
+    if !binary_version_ok(&dest) {
+        let _ = std::fs::remove_file(&dest);
+        return Err("downloaded Xray did not report the pinned version; refusing to run it".to_string());
+    }
+    Ok(dest)
+}
+
+pub fn start_xray_for_profile_with_binary(profile_id: &str, link: &str, binary: &PathBuf) -> Result<ProxyEntry, String> {
     let parsed = parse_share_link(link).map_err(|e| format!("invalid Xray share link: {e}"))?;
-    let binary = resolve_xray_binary()?;
+    let binary = binary.clone();
     let port = free_port().map_err(|e| format!("no free local port for Xray: {e}"))?;
     // Stop a previous sidecar for this profile first, so a relaunch cannot
     // leave two Xray processes behind.
@@ -121,6 +228,15 @@ pub fn start_xray_for_profile(profile_id: &str, link: &str) -> Result<ProxyEntry
         g.insert(profile_id.to_string(), sidecar);
     }
     Ok(entry)
+}
+
+/// Synchronous start for callers that already resolved a binary
+/// (tests, and any path that ran `ensure_xray_binary` first and kept
+/// the path). Production launch and test paths await `ensure` and
+/// call `start_xray_for_profile_with_binary` with its result.
+pub fn start_xray_for_profile(profile_id: &str, link: &str) -> Result<ProxyEntry, String> {
+    let binary = resolve_xray_binary()?;
+    start_xray_for_profile_with_binary(profile_id, link, &binary)
 }
 
 pub fn stop_xray_for_profile(profile_id: &str) {
@@ -158,6 +274,18 @@ mod tests {
         let err = start_xray_for_profile("test-no-xray", "not-a-link").unwrap_err();
         assert!(err.contains("invalid Xray share link"));
         assert!(!xray_running_for("test-no-xray"));
+    }
+
+    #[test]
+    fn non_xray_binary_fails_version_guard() {
+        // A v2rayN binary of another version, or any other executable
+        // in a scanned folder, must never be accepted as this
+        // launcher's pinned sidecar.
+        let dir = std::env::temp_dir();
+        let path = dir.join("shard-xray-version-guard-test.txt");
+        std::fs::write(&path, b"not an xray binary").unwrap();
+        assert!(!binary_version_ok(&path));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
