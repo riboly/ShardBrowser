@@ -1570,6 +1570,7 @@ async fn proxy_bulk_import(text: String, kind: String, epoch: Option<u64>) -> Re
     let default_kind = match kind.as_str() {
         "http" => space::proxy::ProxyKind::Http,
         "https" => space::proxy::ProxyKind::Https,
+        "xray" => space::proxy::ProxyKind::Xray,
         _ => space::proxy::ProxyKind::Socks5,
     };
     let parsed = space::proxy::parse_bulk(&text, default_kind);
@@ -1582,6 +1583,7 @@ fn proxy_bulk_parse(text: String, kind: String) -> Vec<space::proxy::ProxyEntry>
     let default_kind = match kind.as_str() {
         "http" => space::proxy::ProxyKind::Http,
         "https" => space::proxy::ProxyKind::Https,
+        "xray" => space::proxy::ProxyKind::Xray,
         _ => space::proxy::ProxyKind::Socks5,
     };
     space::proxy::parse_bulk(&text, default_kind)
@@ -2835,6 +2837,11 @@ pub fn run() {
         ])
         .setup(|app| {
             let _ = APP_HANDLE.set(app.handle().clone());
+            // One-time move of legacy per-profile Xray bindings into
+            // the proxy list (see space::xray::migrate_legacy): a
+            // profile bound in the old profile-form row keeps its
+            // node, now as a proxy it can be tested and reused.
+            let _ = crate::space::xray::migrate_legacy_bindings();
 
             {
                 use tauri::menu::{Menu, MenuItem};
