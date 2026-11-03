@@ -6,8 +6,8 @@ import { useT } from "../../../shared/i18n";
 import type { FilterChip, FilterField } from "../../../shared/ui/filters";
 
 const STATES = ["working", "failed", "untested"] as const;
-const KINDS = ["socks5", "http", "https"] as const;
-const KIND_LABEL = { socks5: "SOCKS5", http: "HTTP", https: "HTTPS" } as const;
+const KINDS = ["socks5", "http", "https", "xray"] as const;
+const KIND_LABEL = { socks5: "SOCKS5", http: "HTTP", https: "HTTPS", xray: "Xray" } as const;
 
 /** The field and value words, called literally so the i18n check sees every key. */
 function words(t: (k: string) => string) {

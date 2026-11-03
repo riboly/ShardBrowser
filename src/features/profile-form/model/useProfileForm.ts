@@ -15,7 +15,6 @@ import {
 } from "../../../entities/profile";
 import type { FingerprintEntry } from "../../../entities/fingerprint";
 import { proxyBulkParse, proxySave } from "../../../entities/proxy";
-import { xrayBindToProfile, xrayBoundForProfile, xrayUnbindFromProfile } from "../../../entities/proxy/model/xray";
 import { clean, useTags } from "../../../entities/tag";
 
 /// The profile form (manual save, owner 2026-10-07): one dialog creates a
@@ -33,12 +32,6 @@ export type ProfileFormDraft = {
   form: ProfileForm; folder: string; tagIds: string[]; newTags: string[]; newProxyLine: string;
   /** A cookies file picked in the form, imported once the profile is saved. */
   cookies: { name: string; items: unknown[] } | null;
-  /** Xray, bound per profile (Module 5 UI): a link typed here is bound
-   *  only on Save; `boundXray` is the masked display of the link already
-   *  bound to this profile, if any — never the link itself. */
-  newXrayLink: string;
-  xrayUnbind: boolean;
-  boundXray: string | null;
 };
 
 export type ProfileFormStatus = "idle" | "saving" | "error" | "conflict";
@@ -111,7 +104,7 @@ export function changedTabs(s: Pick<ProfileFormState, "draft" | "saved">): Set<P
   const { draft: d, saved: o } = s;
   if (!d || !o) return out;
   if (d.folder !== o.folder || !sameTags(d, o) || (d.cookies?.name ?? null) !== (o.cookies?.name ?? null)) out.add("basics");
-  if (d.newProxyLine !== o.newProxyLine || d.newXrayLink !== o.newXrayLink || d.xrayUnbind !== o.xrayUnbind) out.add("proxy");
+  if (d.newProxyLine !== o.newProxyLine) out.add("proxy");
   for (const k of Object.keys(d.form) as (keyof ProfileForm)[]) {
     if (OWN.has(k) || JSON.stringify(d.form[k]) === JSON.stringify(o.form[k])) continue;
     out.add(tabOf(k));
@@ -168,9 +161,6 @@ const draftOf = (form: ProfileForm): ProfileFormDraft => ({
   newTags: [],
   newProxyLine: "",
   cookies: null,
-  newXrayLink: "",
-  xrayUnbind: false,
-  boundXray: null,
 });
 
 /** The form's opened state, as both draft and what it compares with. */
@@ -187,16 +177,6 @@ async function loadEdit(session: number, id: string) {
     if (get().session !== session) return;
     set({ id: real });
     show(draftOf(form));
-    // The bound Xray link, as its masked display only. It lands in both
-    // draft and saved, so merely opening the form does not count as a
-    // change; a team profile refuses the command and simply shows none.
-    try {
-      const bound = await xrayBoundForProfile(real);
-      if (get().session === session && bound) {
-        const s = get();
-        if (s.draft && s.saved) set({ draft: { ...s.draft, boundXray: bound }, saved: { ...s.saved, boundXray: bound } });
-      }
-    } catch { /* personal-space only; no bound link to show */ }
   } catch (e) {
     if (get().session === session) set({ status: "error", error: String(e), errorDetail: null });
   }
@@ -246,9 +226,6 @@ async function loadCreate(session: number, proxyId: string | null, preset?: Part
     newTags: [],
     newProxyLine: "",
     cookies: null,
-    newXrayLink: "",
-    xrayUnbind: false,
-    boundXray: null,
   });
 }
 
@@ -440,17 +417,6 @@ export async function saveProfileForm(): Promise<boolean> {
       toast.fail({ title: t("profileForm.createdPartly", { name: meta.name }), detail: made.failed.error, subject: meta.name });
       return stayOpen(meta.id, line, made.failed.error);
     }
-    // An Xray link typed in the form binds to this profile only, after
-    // it exists. Binding clears its bound proxy on disk (backend
-    // `bind_link`); a failure leaves the form open as its edit form,
-    // with the typed link still to save, never a half-made profile.
-    if (draft.newXrayLink.trim()) {
-      try {
-        await xrayBindToProfile(meta.id, draft.newXrayLink.trim());
-      } catch (e) {
-        return stayOpen(meta.id, t("profileForm.xrayFailed"), e);
-      }
-    }
     await importPickedCookies(meta.id, meta.name, draft.cookies);
     if (here()) set({ open: false, status: "idle", session: get().session + 1 });
     const ui = useProfileUi.getState();
@@ -472,19 +438,6 @@ export async function saveProfileForm(): Promise<boolean> {
     return false;
   }
   if (result === "failed") return failed(t("profileForm.saveFailed"), t("useProfile.saveFailed", { name }), why);
-
-  // 2b. Its Xray node, bound or dropped, per profile only. A plain edit
-  // with neither change leaves the bound link alone: the backend carries
-  // it through a content edit in `save_raw` (see profile.rs), so an
-  // unrelated save never silently unbinds the profile.
-  if (draft.newXrayLink.trim() || draft.xrayUnbind) {
-    try {
-      if (draft.newXrayLink.trim()) await xrayBindToProfile(id, draft.newXrayLink.trim());
-      else await xrayUnbindFromProfile(id);
-    } catch (e) {
-      return stayOpen(id, t("profileForm.xrayFailed"), e);
-    }
-  }
 
   // 3 and 4. Its tags and its Folder, only what changed.
   const opened = s.saved!;

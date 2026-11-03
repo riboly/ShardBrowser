@@ -1,11 +1,13 @@
 export type ProxyEntry = {
   id: string;
   name: string;
-  kind: "socks5" | "http" | "https";
+  kind: "socks5" | "http" | "https" | "xray";
   host: string;
   port: number;
   username: string;
   password: string;
+  /** Full Xray share link, for kind "xray" only; never shown in full. */
+  xray_link?: string | null;
   country: string;
   notes: string;
 };

@@ -175,6 +175,32 @@ AI maintenance limits (state this honestly to the user, every time):
   300 ms debounce like Donut's proxy form, Parse, Test through a
   temporary sidecar showing exit IP/country/latency, Unbind), in
   zh/en/ru; team profiles show no Xray row (personal-space only).
+- 2026-11-03 (supersedes the row above): Xray nodes are first-class
+  PROXIES, not profile-form bindings — the profile-form Xray row was
+  the wrong place and is removed. An Xray node is added in the proxy
+  page like a SOCKS5 entry (Add proxies → paste share links, or the
+  edit dialog's Xray share-link field; `ProxyEntry.kind == "xray"`,
+  full link in `xray_link`, host/port derived from the link), tested
+  in the proxy page (temporary sidecar, exit IP/country/latency
+  recorded under the entry's own id), and picked in any profile's
+  proxy picker like any other proxy. Two profiles use two nodes by
+  picking two entries. Legacy `_meta.xray_link` bindings are migrated
+  once at startup into proxy entries (profile re-pointed at the new
+  entry); the launch fallback still honours an unmigrated binding.
+  Sidecar binary: the previous "binary not found" on an installed
+  build was a lookup bug — Tauri bundles the sidecar under its bare
+  name (`xray.exe`) next to the app, but the lookup only accepted
+  `xray-<triple>.exe`. The lookup now accepts both, version-checks
+  the binary against the pinned v26.3.27, and, when no bundled binary
+  exists (a portable copy), downloads the pinned archive direct
+  (never through a local proxy), verifies SHA256, extracts only the
+  binary into the launcher's own data dir. v2rayN coexistence: the
+  launcher never reads, writes or runs v2rayN's Xray, never shares a
+  port (free local ports only), a config file (shard-xray-* temp
+  files only) or a process with it, and orphan cleanup only kills
+  pids from pid files this launcher wrote whose command lines
+  reference a shard-xray config; a different-version xray.exe found
+  in a scanned folder is rejected by the version guard.
 - 2026-11-03: Donut reference adopted, UI aside. Donut
   (`donutbrowser/donutbrowser`, `src-tauri/src/xray/`,
   `xray_worker_runner.rs`, `proxy-form-dialog.tsx`) stores an Xray
