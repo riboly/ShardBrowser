@@ -12,7 +12,7 @@ import { SelectField } from "../../../shared/ui/SelectField";
 import { useT } from "../../../shared/i18n";
 import { useProxy, type ProxyEntry } from "../../../entities/proxy";
 
-const FIELDS = ["name", "kind", "host", "port", "username", "password", "country", "notes"] as const;
+const FIELDS = ["name", "kind", "host", "port", "username", "password", "country", "notes", "xray_link"] as const;
 
 /// Edit proxy (manual save, owner 2026-10-07): one dialog changes a proxy,
 /// and nothing is written until Save. Opened by the proxy panel's Edit;
@@ -153,10 +153,23 @@ function EditProxyBody({ id, open, onClose }: { id: string; open: boolean; onClo
                 { value: "socks5" as const, label: "SOCKS5" },
                 { value: "http" as const, label: "HTTP" },
                 { value: "https" as const, label: "HTTPS" },
+                { value: "xray" as const, label: t("proxyEditor.typeXray") },
               ]}
             />
             <Field label={t("proxyEditor.countryLabel")} value={draft.country} onChange={(country) => patch({ country })} />
           </div>
+          {draft.kind === "xray" ? (
+            <Input
+              label={t("proxyEditor.xrayLinkLabel")}
+              inputSize="xsmall"
+              wrapperClassName="gap-[6px]"
+              className="mono"
+              value={draft.xray_link ?? ""}
+              onChange={(e) => patch({ xray_link: e.target.value })}
+              placeholder={t("proxyEditor.xrayLinkPlaceholder")}
+            />
+          ) : (
+          <>
           <div className="grid grid-cols-[1fr_96px] gap-stack-md">
             <Input
               label={t("proxyEditor.hostLabel")}
@@ -201,6 +214,8 @@ function EditProxyBody({ id, open, onClose }: { id: string; open: boolean; onClo
               }
             />
           </div>
+          </>
+          )}
           <Field label={t("proxyPeek.notes")} value={draft.notes} onChange={(notes) => patch({ notes })} />
         </div>
       </fieldset>

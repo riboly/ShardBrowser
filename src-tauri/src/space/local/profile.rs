@@ -155,6 +155,11 @@ pub struct StoredMeta {
     /// Inline proxy from temporary profile API; not in proxy store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_proxy: Option<super::proxy::ProxyEntry>,
+    /// Xray share link for this profile (Module 4/5). When set, launch
+    /// starts an Xray sidecar and the engine uses its local SOCKS5 instead
+    /// of any bound proxy. Stored like other proxy credentials: never logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xray_link: Option<String>,
     /// Hidden from listings; auto-deleted on close.
     #[serde(default, skip_serializing_if = "is_false")]
     pub temporary: bool,
@@ -507,6 +512,17 @@ fn save_raw_locked(stored: &mut StoredProfile) -> Result<()> {
             // proxy bind / folder move) carries the existing counter through.
             if stored.meta.total_runtime_ms == 0 {
                 stored.meta.total_runtime_ms = existing.meta.total_runtime_ms;
+            }
+            // Xray binding survives a form save that does not mention it:
+            // the frontend form round-trips only the fields it shows, so a
+            // plain edit (name, notes, fingerprint) arrives with
+            // xray_link = None, and dropping it would silently unbind the
+            // profile. Only a content edit carries it through: a meta-only
+            // write with xray_link = None is an explicit unbind (or a
+            // bind/unbind step of its own), and must be respected, not
+            // restored. A bind writes Some(link), so it needs no carry.
+            if stored.meta.xray_link.is_none() && stored.config != existing.config {
+                stored.meta.xray_link = existing.meta.xray_link.clone();
             }
             // Only a change to the profile's own content moves the counter.
             // Launching a profile writes last_launched_at, and closing it

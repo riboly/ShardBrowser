@@ -1667,6 +1667,7 @@ async fn proxy_bulk_import(text: String, kind: String, epoch: Option<u64>) -> Re
     let default_kind = match kind.as_str() {
         "http" => space::proxy::ProxyKind::Http,
         "https" => space::proxy::ProxyKind::Https,
+        "xray" => space::proxy::ProxyKind::Xray,
         _ => space::proxy::ProxyKind::Socks5,
     };
     let parsed = space::proxy::parse_bulk(&text, default_kind);
@@ -1679,9 +1680,39 @@ fn proxy_bulk_parse(text: String, kind: String) -> Vec<space::proxy::ProxyEntry>
     let default_kind = match kind.as_str() {
         "http" => space::proxy::ProxyKind::Http,
         "https" => space::proxy::ProxyKind::Https,
+        "xray" => space::proxy::ProxyKind::Xray,
         _ => space::proxy::ProxyKind::Socks5,
     };
     space::proxy::parse_bulk(&text, default_kind)
+}
+
+/// Xray share links (Module 5): parse bulk text without saving.
+#[tauri::command]
+fn xray_bulk_parse(text: String) -> Vec<space::xray::XrayImportResult> {
+    space::xray::bulk_parse(&text)
+}
+
+/// Bind an Xray share link to a personal profile; returns masked display.
+#[tauri::command]
+fn xray_bind_to_profile(profile_id: String, link: String) -> Result<String, String> {
+    space::xray::bind_to_profile(&profile_id, &link).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn xray_unbind_from_profile(profile_id: String) -> Result<(), String> {
+    space::xray::unbind_from_profile(&profile_id).map_err(|e| e.to_string())
+}
+
+/// Masked display of a profile's bound Xray link, if any; never the link.
+#[tauri::command]
+fn xray_bound_for_profile(profile_id: String) -> Result<Option<String>, String> {
+    space::xray::bound_for_profile(&profile_id).map_err(|e| e.to_string())
+}
+
+/// Test a share link through a temporary Xray sidecar (local port).
+#[tauri::command]
+async fn xray_test_link(link: String) -> Result<space::proxy::TestSnapshot, String> {
+    space::xray::test_link(&link).await.map_err(|e| e.to_string())
 }
 
 /// Persist pre-tested proxies (bulk dialog).
@@ -2822,6 +2853,11 @@ pub fn run() {
             proxy_last_test,
             proxy_bulk_import,
             proxy_bulk_parse,
+            xray_bulk_parse,
+            xray_bind_to_profile,
+            xray_unbind_from_profile,
+            xray_bound_for_profile,
+            xray_test_link,
             proxy_bulk_save,
             launch,
             settings_get,
@@ -2906,6 +2942,11 @@ pub fn run() {
         ])
         .setup(|app| {
             let _ = APP_HANDLE.set(app.handle().clone());
+            // One-time move of legacy per-profile Xray bindings into
+            // the proxy list (see space::xray::migrate_legacy): a
+            // profile bound in the old profile-form row keeps its
+            // node, now as a proxy it can be tested and reused.
+            let _ = crate::space::xray::migrate_legacy_bindings();
 
             {
                 use tauri::menu::{Menu, MenuItem};

@@ -163,6 +163,7 @@ export function ProxyBulkImporter({ open, onClose }: { open: boolean; onClose: (
                 { value: "socks5", label: "SOCKS5" },
                 { value: "http", label: "HTTP" },
                 { value: "https", label: "HTTPS" },
+                { value: "xray", label: t("proxyEditor.typeXray") },
               ]}
             />
             <Textarea

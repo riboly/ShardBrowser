@@ -9,7 +9,7 @@ import { useT } from "../../shared/i18n";
 import type { ProxyEntry } from "../../entities/proxy";
 import { PS_SIGNATURES, psActive, psSignatureSet } from "../../entities/proxyshard";
 
-const KIND = { socks5: "SOCKS5", http: "HTTP", https: "HTTPS" } as const;
+const KIND = { socks5: "SOCKS5", http: "HTTP", https: "HTTPS", xray: "Xray" } as const;
 
 /// A proxy's details, read: label and value rows, as the profile panel's.
 /// Nothing here changes the proxy; Edit in the header opens the dialog where

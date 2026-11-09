@@ -590,6 +590,63 @@ struct Ready<'a> {
 }
 
 async fn start_browser(bin: &Path, input: LaunchInput, opts: &LaunchOpts<'_>) -> Result<LaunchOutcome> {
+    // Xray profile (Module 4): start the sidecar first, then let every
+    // existing step below (UDP probe, geo check, --proxy-server arg,
+    // QUIC / WebRTC gating) work on its local SOCKS5 entry. On failure,
+    // fail closed: do not launch the profile at all.
+    let mut input = input;
+    // Xray as a proxy entry (the proxy-page model): a profile whose
+    // bound proxy is an Xray node starts a sidecar for that node and
+    // runs through its local SOCKS5 entry, exactly like the legacy
+    // per-profile binding below. Either way, one profile's sidecar is
+    // its own process on its own free local port: it never shares a
+    // port, a config file or a process with v2rayN's Xray, and the
+    // launcher never stops another tool's processes (cleanup only
+    // touches pid files this launcher wrote, whose command lines
+    // reference a shard-xray config).
+    if input.stored.meta.xray_link.is_none() {
+        if let Some(p) = input.proxy.clone() {
+            if p.kind == proxy::ProxyKind::Xray {
+                if let Some(link) = p.xray_link.clone() {
+                    match crate::space::xray::start_for_profile(&input.profile_id, &link).await {
+                        Ok(local) => {
+                            eprintln!(
+                                "[launcher] Xray started for profile {} on {}",
+                                input.profile_id,
+                                local.to_proxy_server_arg()
+                            );
+                            input.proxy = Some(local);
+                        }
+                        Err(e) => {
+                            return Err(anyhow::anyhow!(
+                                "Xray failed to start for profile {}: {e} — profile not launched",
+                                input.profile_id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(link) = input.stored.meta.xray_link.clone() {
+        match crate::space::xray::start_for_profile(&input.profile_id, &link).await {
+            Ok(local) => {
+                eprintln!(
+                    "[launcher] Xray started for profile {} on {}",
+                    input.profile_id,
+                    local.to_proxy_server_arg()
+                );
+                input.proxy = Some(local);
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "Xray failed to start for profile {}: {e} — profile not launched",
+                    input.profile_id
+                ));
+            }
+        }
+    }
+
     // Read off the engine binary while the proxy is probed; once per engine version.
     let ext_alone = (!input.extensions.is_empty() || input.library.is_some()).then(|| {
         let bin = bin.to_path_buf();
@@ -799,6 +856,18 @@ async fn start_browser(bin: &Path, input: LaunchInput, opts: &LaunchOpts<'_>) ->
         None => (cmd.spawn().context("start the ShardBrowser engine")?, process::Tie::default()),
     };
     let pid = Tracker::shared().track(profile_id.clone(), child, udd.clone(), exit, ext_ids);
+    if crate::space::xray::running_for(&profile_id) {
+        let watch_id = profile_id.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if !Tracker::shared().is_running(&watch_id) {
+                    crate::space::xray::stop_for_profile(&watch_id);
+                    break;
+                }
+            }
+        });
+    }
 
     if let Some(s) = &remote {
         s.spawned(tie, pid);

@@ -1336,3 +1336,115 @@ mod tests {
         assert_eq!(folder_of("fb2"), "");
     }
 }
+
+/// Xray sidecar launch facade (Module 4). The local modules stay private
+/// to `space`; launch.rs goes through this facade, like `space::proxy`.
+pub mod xray {
+    use super::local::xray_import as import;
+    use super::local::xray_launch as launch;
+    use anyhow::Result;
+    pub use import::XrayImportResult;
+    pub use launch::{local_proxy_entry, local_proxy_server_arg, resolve_xray_binary, xray_running_for};
+    pub async fn start_for_profile(profile_id: &str, link: &str) -> Result<super::proxy::ProxyEntry, String> {
+        let binary = launch::ensure_xray_binary().await?;
+        launch::start_xray_for_profile_with_binary(profile_id, link, &binary)
+    }
+    pub fn stop_for_profile(profile_id: &str) {
+        launch::stop_xray_for_profile(profile_id);
+    }
+    pub fn running_for(profile_id: &str) -> bool {
+        launch::xray_running_for(profile_id)
+    }
+    /// Parse bulk-import text without saving; per-line results, no credentials.
+    pub fn bulk_parse(text: &str) -> Vec<XrayImportResult> {
+        import::import_lines(text)
+    }
+    /// Bind an Xray share link to a personal profile (Module 5). Team
+    /// profiles are refused: Xray binding is personal-space only.
+    pub fn bind_to_profile(profile_id: &str, link: &str) -> Result<String> {
+        super::personal_only()?;
+        let mut stored = super::profile::load_raw(profile_id)?;
+        let masked = import::bind_link(&mut stored, link).map_err(anyhow::Error::msg)?;
+        super::local::profile::save_raw(&mut stored)?;
+        Ok(masked)
+    }
+    pub fn unbind_from_profile(profile_id: &str) -> Result<()> {
+        super::personal_only()?;
+        let mut stored = super::profile::load_raw(profile_id)?;
+        import::unbind_link(&mut stored);
+        super::local::profile::save_raw(&mut stored)?;
+        Ok(())
+    }
+    /// Masked display of the link bound to a profile, if any. Never the
+    /// link itself: the editor shows only `scheme://host:port`, and the
+    /// full link stays on disk until launch reads it.
+    pub fn bound_for_profile(profile_id: &str) -> Result<Option<String>> {
+        super::personal_only()?;
+        let stored = super::profile::load_raw(profile_id)?;
+        let Some(link) = stored.meta.xray_link.as_deref() else {
+            return Ok(None);
+        };
+        let parsed = super::local::xray_share::parse_share_link(link).map_err(anyhow::Error::msg)?;
+        Ok(Some(parsed.masked_display()))
+    }
+    /// Migrate a legacy per-profile Xray binding (the profile-form
+    /// Xray row, removed in favour of the proxy-page model) into a
+    /// first-class proxy entry, and point the profile at it. The
+    /// profile's launch behaviour does not change: it ran through
+    /// this node before, it runs through the same node as its proxy
+    /// now, and the node appears in the proxy list where it can be
+    /// tested and picked by other profiles. A failure migrates
+    /// nothing and leaves the legacy binding for the launch fallback.
+    pub fn migrate_legacy(profile_id: &str) -> Result<Option<super::proxy::ProxyEntry>> {
+        super::personal_only()?;
+        let mut stored = super::profile::load_raw(profile_id)?;
+        let Some(link) = stored.meta.xray_link.clone() else {
+            return Ok(None);
+        };
+        let parsed = super::local::xray_share::parse_share_link(&link).map_err(anyhow::Error::msg)?;
+        let entry = super::proxy::ProxyEntry {
+            id: String::new(),
+            name: if parsed.name.is_empty() { format!("{}:{}", parsed.host, parsed.port) } else { parsed.name.clone() },
+            kind: super::proxy::ProxyKind::Xray,
+            host: parsed.host.clone(),
+            port: parsed.port,
+            username: String::new(),
+            password: String::new(),
+            xray_link: Some(link),
+            country: String::new(),
+            notes: String::new(),
+        };
+        let saved = super::local::proxy::upsert_dedup(entry)?;
+        stored.meta.proxy_id = Some(saved.id.clone());
+        stored.meta.inline_proxy = None;
+        stored.meta.xray_link = None;
+        super::local::profile::save_raw(&mut stored)?;
+        Ok(Some(saved))
+    }
+
+    /// Migrate every legacy binding once, at startup. Returns the
+    /// profile ids moved; a profile that fails is left as it was.
+    pub fn migrate_legacy_bindings() -> Vec<String> {
+        let Ok(all) = super::profile::list_all() else {
+            return Vec::new();
+        };
+        let mut moved = Vec::new();
+        for meta in all {
+            if let Ok(Some(_)) = migrate_legacy(&meta.id) {
+                moved.push(meta.id);
+            }
+        }
+        moved
+    }
+
+    /// Test a share link through a temporary Xray sidecar: start it, run
+    /// the existing proxy test against its LOCAL port (so the reported
+    /// exit IP / country are the upstream's, never 127.0.0.1), stop it.
+    pub async fn test_link(link: &str) -> Result<super::proxy::TestSnapshot> {
+        let binary = launch::ensure_xray_binary().await.map_err(anyhow::Error::msg)?;
+        let entry = launch::start_xray_for_profile_with_binary("xray-test", link, &binary).map_err(anyhow::Error::msg)?;
+        let result = super::proxy::full_test(&entry).await;
+        launch::stop_xray_for_profile("xray-test");
+        result
+    }
+}

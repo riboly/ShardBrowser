@@ -215,6 +215,7 @@ pub fn proxy(row: &ProxyRow, login: Option<&str>) -> ProxyEntry {
         port: 0,
         username: String::new(),
         password: String::new(),
+        xray_link: None,
         country: String::new(),
         notes: String::new(),
     });

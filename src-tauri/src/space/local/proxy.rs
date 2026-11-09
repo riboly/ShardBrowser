@@ -12,6 +12,12 @@ pub enum ProxyKind {
     Socks5,
     Http,
     Https,
+    /// An Xray node, stored as its share link (`xray_link`). It is a
+    /// first-class proxy: it lives in the proxy list, is tested there,
+    /// and is picked in the profile form like any other proxy. It is
+    /// NEVER dialled directly: launch and test start a local Xray
+    /// sidecar first and use its local SOCKS5 entry instead.
+    Xray,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +32,12 @@ pub struct ProxyEntry {
     pub username: String,
     #[serde(default)]
     pub password: String,
+    /// Full Xray share link, for kind == Xray only. The credentials and
+    /// protocol parameters live here, never split into host/user/pass:
+    /// splitting them would lose flow, reality and transport settings.
+    /// Display code shows only scheme://host:port (masked_display).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xray_link: Option<String>,
     /// "PL", "US", …
     #[serde(default)]
     pub country: String,
@@ -41,6 +53,9 @@ impl ProxyEntry {
     /// from one host, port and user, so those are different proxies. Only an
     /// identical one is skipped on import.
     pub fn same_proxy(&self, other: &ProxyEntry) -> bool {
+        if self.kind == ProxyKind::Xray || other.kind == ProxyKind::Xray {
+            return self.kind == other.kind && self.xray_link == other.xray_link;
+        }
         self.kind == other.kind
             && self.host == other.host
             && self.port == other.port
@@ -50,10 +65,17 @@ impl ProxyEntry {
 
     /// Build `--proxy-server=<scheme>://[user:pass@]host:port` for ShardX.
     pub fn to_proxy_server_arg(&self) -> String {
+        if self.kind == ProxyKind::Xray {
+            // No direct engine arg exists for an Xray node: launch and
+            // test replace it with a local SOCKS5 entry first. A dead
+            // local port here fails closed instead of leaking direct.
+            return "socks5://127.0.0.1:1".to_string();
+        }
         let scheme = match self.kind {
             ProxyKind::Socks5 => "socks5",
             ProxyKind::Http => "http",
             ProxyKind::Https => "https",
+            ProxyKind::Xray => unreachable!(),
         };
         let host_port = format!("{}:{}", self.host, self.port);
         if self.username.is_empty() && self.password.is_empty() {
@@ -146,7 +168,32 @@ pub(in crate::space) fn list() -> Result<Vec<ProxyEntry>> {
     Ok(load()?.proxies)
 }
 
+/// An Xray entry's listable fields come from its link: the edit
+/// dialog, the API and the bulk importer all send the link and let
+/// this derive host/port (and a name, when none was given). Every
+/// door that stores an entry runs this first, so no door can store
+/// an Xray entry with a stale or empty endpoint.
+fn normalise_xray(entry: &mut ProxyEntry) -> Result<()> {
+    if entry.kind != ProxyKind::Xray {
+        return Ok(());
+    }
+    let Some(link) = entry.xray_link.clone() else {
+        return Err(anyhow::anyhow!("Xray proxy needs a share link"));
+    };
+    let parsed = super::xray_share::parse_share_link(&link)
+        .map_err(|e| anyhow::anyhow!("invalid Xray share link: {e}"))?;
+    entry.host = parsed.host.clone();
+    entry.port = parsed.port;
+    if entry.name.is_empty() {
+        entry.name = if parsed.name.is_empty() { format!("{}:{}", parsed.host, parsed.port) } else { parsed.name.clone() };
+    }
+    entry.username.clear();
+    entry.password.clear();
+    Ok(())
+}
+
 pub(in crate::space) fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+    normalise_xray(&mut entry)?;
     if entry.id.is_empty() {
         entry.id = uuid::Uuid::new_v4().to_string();
     }
@@ -163,6 +210,7 @@ pub(in crate::space) fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
 /// Upsert that reuses an identical entry (`same_proxy`): one with the same
 /// endpoint and user but another password is a proxy of its own.
 pub(in crate::space) fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+    normalise_xray(&mut entry)?;
     let mut s = load()?;
     if let Some(existing) = s.proxies.iter().find(|p| p.same_proxy(&entry)) {
         return Ok(existing.clone());
@@ -187,6 +235,7 @@ pub(in crate::space) fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry
 /// separate door, opened only when the caller names the profile the proxy
 /// belongs to.
 pub(in crate::space) fn upsert_for_binding(mut entry: ProxyEntry, bound_id: Option<&str>) -> Result<ProxyEntry> {
+    normalise_xray(&mut entry)?;
     let mut s = load()?;
     if let Some(existing) = s.proxies.iter().find(|p| p.same_proxy(&entry)) {
         return Ok(existing.clone());
@@ -366,6 +415,14 @@ async fn probe_inner(entry: &ProxyEntry) -> Result<u128> {
         .context("connect timeout")??;
 
     match entry.kind {
+        // An Xray entry is never probed directly: its test and launch
+        // paths start a local sidecar first and probe the local SOCKS5
+        // entry. Reaching here with one means a caller forgot that
+        // step; fail closed rather than dialling the upstream as if
+        // it were a plain proxy.
+        ProxyKind::Xray => {
+            anyhow::bail!("Xray entries are probed through their local sidecar, not directly");
+        }
         ProxyKind::Socks5 => {
             socks5_handshake(&mut stream, entry).await?;
 
@@ -472,6 +529,42 @@ pub fn parse_bulk(text: &str, default_kind: ProxyKind) -> Vec<ProxyEntry> {
 }
 
 fn parse_one(line: &str, default_kind: &ProxyKind) -> Option<ProxyEntry> {
+    // Xray share links first: their `#fragment` is the node's name, not
+    // the bulk format's `# country=US note=foo` comment, and their
+    // parameters must survive intact in xray_link.
+    if matches!(default_kind, ProxyKind::Xray)
+        || line.starts_with("vless://")
+        || line.starts_with("vmess://")
+        || line.starts_with("trojan://")
+        || line.starts_with("ss://")
+        || line.starts_with("hysteria2://")
+    {
+        if let Ok(parsed) = super::xray_share::parse_share_link(line) {
+            return Some(ProxyEntry {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: if parsed.name.is_empty() { format!("{}:{}", parsed.host, parsed.port) } else { parsed.name.clone() },
+                kind: ProxyKind::Xray,
+                host: parsed.host.clone(),
+                port: parsed.port,
+                username: String::new(),
+                password: String::new(),
+                xray_link: Some(line.to_string()),
+                country: String::new(),
+                notes: String::new(),
+            });
+        }
+        // A line that looks like an Xray link but does not parse is not
+        // silently a SOCKS5 entry: drop it, the preview shows nothing
+        // for it rather than a proxy that cannot work.
+        if line.starts_with("vless://")
+            || line.starts_with("vmess://")
+            || line.starts_with("trojan://")
+            || line.starts_with("ss://")
+            || line.starts_with("hysteria2://")
+        {
+            return None;
+        }
+    }
     // Optional trailing `# country=US note=foo`.
     let (main, comment) = match line.find('#') {
         Some(i) => (line[..i].trim(), Some(line[i + 1..].trim())),
@@ -539,6 +632,7 @@ fn parse_one(line: &str, default_kind: &ProxyKind) -> Option<ProxyEntry> {
         port,
         username: user,
         password: pass,
+        xray_link: None,
         country,
         notes,
     })
@@ -891,6 +985,10 @@ async fn geo_check_one(entry: Option<&ProxyEntry>, provider: &str) -> Result<Geo
             ProxyKind::Socks5 => "socks5h", // DNS via proxy
             ProxyKind::Http => "http",
             ProxyKind::Https => "https",
+            // Geo for an Xray entry runs through its local sidecar
+            // (see full_test); a direct geo request here would both
+            // fail and leak the host address, so refuse it outright.
+            ProxyKind::Xray => anyhow::bail!("Xray entries are geo-checked through their local sidecar, not directly"),
         };
         let proxy_url = if entry.username.is_empty() && entry.password.is_empty() {
             format!("{scheme}://{}:{}", entry.host, entry.port)
@@ -1201,7 +1299,43 @@ fn unix_now() -> String {
 }
 
 /// Run TCP + UDP + geo, persist into history, auto-fill country tag.
+///
+/// An Xray entry is never probed directly: a temporary sidecar is
+/// started for its link (keyed by the entry, so concurrent tests of
+/// different entries do not stop each other's sidecar), the local
+/// SOCKS5 entry is measured, and the sidecar is stopped. The result is
+/// recorded under the Xray entry's own id, so the proxy list shows the
+/// upstream exit IP and latency, not 127.0.0.1.
 pub(in crate::space) async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
+    if entry.kind == ProxyKind::Xray {
+        let Some(link) = entry.xray_link.clone() else {
+            return Err(anyhow::anyhow!("Xray proxy has no share link"));
+        };
+        // The sidecar binary itself: bundled with the install, or
+        // downloaded on first use (verified) for a portable copy.
+        let key = if entry.id.is_empty() {
+            "xray-test".to_string()
+        } else {
+            format!("xray-test-{}", entry.id)
+        };
+        let binary = super::xray_launch::ensure_xray_binary().await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let local = super::xray_launch::start_xray_for_profile_with_binary(&key, &link, &binary)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let snap = measure(&local).await;
+        super::xray_launch::stop_xray_for_profile(&key);
+        let recorded = record_test(&entry.id, snap)?;
+        if !recorded.country_code.is_empty() {
+            let mut store_data = load()?;
+            if let Some(p) = store_data.proxies.iter_mut().find(|p| p.id == entry.id) {
+                if p.country.is_empty() || p.country == "—" {
+                    p.country = recorded.country_code.clone();
+                    save(&store_data)?;
+                }
+            }
+        }
+        return Ok(recorded);
+    }
     let recorded = record_test(&entry.id, measure(entry).await)?;
 
     // Backfill empty country tag on the stored entry.
@@ -1541,5 +1675,46 @@ mod tests {
         e.port = addr.port();
         let err = probe(&e).await.expect_err("a refused CONNECT is a failure");
         assert!(err.to_string().contains("ruleset"), "says why: {err}");
+    }
+
+    /// Proxy-page model: a pasted VLESS link becomes an Xray proxy
+    /// entry, not a SOCKS5 entry with a mangled host. The full link
+    /// survives (parameters intact), the list shows host:port, and
+    /// the name comes from the link fragment.
+    #[test]
+    fn bulk_parse_turns_share_link_into_xray_entry() {
+        let rows = parse_bulk("vless://11111111-2222-3333-4444-555555555555@node-a.invalid:443?security=tls&sni=node-a.invalid#node-a", ProxyKind::Socks5);
+        assert_eq!(rows.len(), 1);
+        let e = &rows[0];
+        assert!(matches!(e.kind, ProxyKind::Xray));
+        assert_eq!(e.host, "node-a.invalid");
+        assert_eq!(e.port, 443);
+        assert_eq!(e.name, "node-a");
+        assert_eq!(e.xray_link.as_deref(), Some("vless://11111111-2222-3333-4444-555555555555@node-a.invalid:443?security=tls&sni=node-a.invalid#node-a"));
+        // Credentials stay inside the link, never split out.
+        assert!(e.username.is_empty());
+        assert!(e.password.is_empty());
+    }
+
+    #[test]
+    fn xray_dedup_compares_links_not_endpoints() {
+        let a = parse_bulk("trojan://pass@node-b.invalid:443#one", ProxyKind::Socks5).pop().unwrap();
+        let mut b = a.clone();
+        b.id = uuid::Uuid::new_v4().to_string();
+        assert!(a.same_proxy(&b));
+        b.xray_link = Some("trojan://other@node-b.invalid:443#one".to_string());
+        assert!(!a.same_proxy(&b));
+        // And an Xray entry is never "the same" as a plain SOCKS5 entry
+        // on the same host and port.
+        let mut c = a.clone();
+        c.kind = ProxyKind::Socks5;
+        c.xray_link = None;
+        assert!(!a.same_proxy(&c));
+    }
+
+    #[test]
+    fn unparsable_xray_line_is_dropped_not_misparsed() {
+        let rows = parse_bulk("vless://not-a-link", ProxyKind::Socks5);
+        assert!(rows.is_empty());
     }
 }

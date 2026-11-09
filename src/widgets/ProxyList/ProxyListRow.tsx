@@ -1,6 +1,6 @@
-import { memo, useMemo, useRef, type ReactNode } from "react";
+import { memo, useMemo, useRef, useState, type ReactNode } from "react";
 import { Checkbox, cn, IconButton, swallowFollowUpClick, Tooltip, useLongPress, type ContextMenuApi } from "@proxyshard/shardx-ui-kit";
-import { AlertCircleIcon, MoreIcon } from "../../shared/icons";
+import { AlertCircleIcon, EditIcon, MoreIcon } from "../../shared/icons";
 import { CountryFlag } from "../../shared/ui/CountryFlag";
 import { RowHoverActions, rowButtonDangerHoverClass, rowButtonHoverClass } from "../../shared/ui/RowHoverActions";
 import { ProtocolPill } from "../../shared/ui/ProtocolPill";
@@ -45,6 +45,22 @@ export const ProxyListRow = memo(function ProxyListRow({ proxy, profileCount, to
   const selectRangeTo = useProxy((s) => s.selectRangeTo);
   const setActive = useProxy((s) => s.setActive);
   const openPeek = useProxy((s) => s.openPeek);
+  const renameProxy = useProxy((s) => s.renameProxy);
+  // Inline rename of the name cell: hover shows the pencil, a
+  // double-click on the name opens the same editor. The store's
+  // renameProxy already saves (and toasts on refusal); this is only
+  // the entry point the list was missing.
+  const [renaming, setRenaming] = useState(false);
+  const [draft, setDraft] = useState("");
+  // Enter and blur both commit: the first wins, so one edit saves once.
+  const committed = useRef(false);
+  const startRename = () => { committed.current = false; setDraft(p.name); setRenaming(true); };
+  const commitRename = () => {
+    if (committed.current) return;
+    committed.current = true;
+    setRenaming(false);
+    void renameProxy(p.id, draft);
+  };
   const shiftPress = useRef(false);
   // Cmd-press on macOS, Ctrl-press elsewhere adds or removes the row (WIG-08).
   const modPress = useRef(false);
@@ -106,9 +122,43 @@ export const ProxyListRow = memo(function ProxyListRow({ proxy, profileCount, to
           >
             {/* As wide as its names need (owner, 2026-09-30): a rare long
                 one is cut, and shows whole on hover. */}
-            <Tooltip content={p.name || address} whenTruncated>
-              <span className="min-w-0 truncate text-ui">{p.name || address}</span>
-            </Tooltip>
+            {renaming ? (
+              <input
+                aria-label={t("commands.rename")}
+                className="min-w-0 flex-1 bg-transparent text-ui outline-none"
+                value={draft}
+                autoFocus
+                onFocus={(e) => e.currentTarget.select()}
+                onChange={(e) => setDraft(e.target.value)}
+                onPointerDown={(e) => e.stopPropagation()}
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === "Enter") commitRename();
+                  if (e.key === "Escape") setRenaming(false);
+                }}
+                onBlur={commitRename}
+              />
+            ) : (
+              <>
+                <Tooltip content={p.name || address} whenTruncated>
+                  <span className="min-w-0 truncate text-ui">{p.name || address}</span>
+                </Tooltip>
+                {/* The pencil appears with the row's hover actions: a name
+                    is renamed here, not only through the row menu. */}
+                <IconButton
+                  variant="neutral"
+                  mode="ghost"
+                  size="3xsmall"
+                  tabIndex={active ? 0 : -1}
+                  className="pointer-events-auto shrink-0 opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                  icon={<EditIcon className="size-3.5" />}
+                  label={t("commands.rename")}
+                  onClick={(e) => { e.stopPropagation(); startRename(); }}
+                />
+              </>
+            )}
             {/* The Test column hidden, a failed last test still shows, as a
                 mark and a word, never a hue alone (A11Y-18). */}
             {!order.includes("test") && status === "failed" && !busy && (
@@ -245,7 +295,12 @@ export const ProxyListRow = memo(function ProxyListRow({ proxy, profileCount, to
         // The Peek that opens narrows the list: the second press of a
         // double-click lands on nothing (Show password, Close or Test now in
         // Peek, the strip's Test), as on Profiles (Pair 40 review, I1).
-        if (e.detail === 1 && e.button === 0 && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) swallowFollowUpClick(e);
+        // Except on the name cell: there the second press opens the
+        // inline rename, so a double-click on a name renames it.
+        if (e.detail === 1 && e.button === 0 && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey) {
+          const inName = (e.target as HTMLElement).closest("[data-cell='name']") != null;
+          swallowFollowUpClick(e, inName ? { onFollow: startRename } : undefined);
+        }
       }}
     >
       <div role="gridcell" data-cell="checkbox" className="list-pin-check flex items-center self-stretch">

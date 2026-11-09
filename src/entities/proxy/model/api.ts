@@ -13,6 +13,7 @@ export const emptyProxy = (): ProxyEntry => ({
   port: 1080,
   username: "",
   password: "",
+  xray_link: null,
   country: "",
   notes: "",
 });

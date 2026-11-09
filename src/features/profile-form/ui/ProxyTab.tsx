@@ -6,6 +6,8 @@ import { ProxyRow } from "./fields";
 /// Proxy: the picker ("No proxy", every proxy, a search), and a new proxy
 /// from a pasted line, added only when the form is saved. The walk through
 /// the form points at the picker and its help line.
+/// An Xray node is a proxy entry now (proxy page): it is picked
+/// here through the same picker, not pasted in this form.
 export function ProxyTab({ draft }: { draft: ProfileFormDraft }) {
   const t = useT();
   return (
