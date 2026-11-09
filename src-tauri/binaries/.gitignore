@@ -1,2 +1,5 @@
-*
-!.gitignore
+# Xray sidecar binaries are downloaded at build time, never committed.
+# Keep this file only; everything else in this directory is build output.
+xray-*
+*.source.json
+xray-LICENSE.txt
