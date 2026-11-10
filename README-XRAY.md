@@ -55,9 +55,25 @@ Status: DONE 2026-11-03. Parser in src-tauri/src/space/local/xray_share.rs, 12 u
 
 ## Module 2: Xray binary packaging
 
-2.1 Pin Xray-core v26.3.27 (same pin as Donut). Do NOT track latest automatically:
-  from v26.10.21 Xray refuses VLESS without TLS/encryption and Trojan without TLS
-  to a public address, which would break old share links.
+2.1 Pin Xray-core v26.11.9 (2026-11-09; was v26.3.27 until 2026-11-10,
+  when the old REALITY handshake — no X25519MLKEM768 key share, old
+  client version — got three of the user's servers blocked). Do NOT
+  track latest automatically, and do NOT bump it as part of an upstream
+  sync; an Xray upgrade is a separate, explicitly approved task.
+  Security rules the current core enforces, mirrored at import so a
+  bad link fails with a reason instead of killing the sidecar:
+  since core 26.7.11 a plaintext VLESS (no TLS, no VLESS Encryption)
+  or Trojan to a public address is refused outright; Shadowsocks
+  `none`/`plain` methods are gone; REALITY works only over TCP (raw),
+  xhttp or gRPC, never WebSocket/HTTPUpgrade/mKCP.
+2.1a REALITY / TLS parameter completeness (per official docs, 2026-11-10):
+  REALITY emits `password` (canonical name; `publicKey` is the old
+  alias), always emits `fingerprint` (default `chrome` when the link
+  carries no `fp` — only chrome/firefox/safari guarantee ML-KEM),
+  and passes through `spx` -> `spiderX` and `mldsa65Verify`.
+  VMess JSON links map `tls` -> `security`, `net` -> `type`
+  (transport; the JSON `type` is the header type and must not
+  overwrite it), and copy `fp`, `scy`, `aid`.
 2.2 Per-platform assets with SHA256 verification (Windows x64, macOS arm64/x64,
   Linux x64/arm64), downloaded at build time, like Donut `download-xray.mjs`.
 2.3 Ship the Xray LICENSE file with the binary. Binary itself goes to .gitignore
@@ -239,3 +255,25 @@ window pops up on profile start.
   with a real node and the Windows build (now Windows-only workflow,
   commit 25d7bb8), and a real-node test of the authenticated local
   inbound through the engine's proxy arg.
+
+## 2026-11-10: Xray upgraded to v26.11.9, parameters completed
+
+- Pin moved v26.3.27 -> v26.11.9 (latest stable, 2026-11-09) with new
+  SHA256s in both `xray_binary.rs` and `download-xray.mjs`; the version
+  guard follows the const, so no other change was needed there. The
+  old pin's REALITY handshake (no ML-KEM768, old client version) had
+  three of the user's servers blocked.
+- REALITY now emits the canonical `password` field, always emits
+  `fingerprint` (default `chrome`), and passes through `spx` ->
+  `spiderX` and `mldsa65Verify`. TLS also always emits `fingerprint`
+  (default `chrome`). Trojan defaults to TLS when the link carries no
+  security param. VMess JSON links now map `tls` -> `security`,
+  `net` -> `type`, and copy `fp`, `scy`, `aid`.
+- Import now rejects what the current core refuses: plaintext VLESS /
+  Trojan to a public IP literal, SS `none`/`plain`, REALITY over
+  WebSocket/HTTPUpgrade/mKCP. Domain hosts are left to the core at
+  runtime; a failed start still fails closed.
+- Delete confirmation (not Xray, same release): personal profile
+  delete (`deleteMany`) now asks first via the same `confirmModal`
+  the team delete already used; new `useProfile.trashTitle(One)` /
+  `trashMessage` / `trashConfirm` keys in zh/en/ru.

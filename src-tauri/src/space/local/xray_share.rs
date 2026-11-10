@@ -133,6 +133,102 @@ fn split_fragment(input: &str) -> (&str, String) {
     }
 }
 
+/// Is `host` a private/loopback IP literal? A domain name is not a
+/// literal: the core resolves it and decides at runtime (and a failed
+/// start fails closed), so only a literal public IP is rejected below.
+fn is_private_ip_literal(host: &str) -> bool {
+    use std::net::IpAddr;
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return false;
+    };
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 10
+                || (o[0] == 172 && (16..=31).contains(&o[1]))
+                || (o[0] == 192 && o[1] == 168)
+                || o[0] == 127
+                || (o[0] == 169 && o[1] == 254)
+        }
+        IpAddr::V6(v6) => {
+            let s = v6.segments();
+            v6.is_loopback() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Security-first import rules for the current Xray core (26.7.11+).
+/// These reject links the core itself would refuse, with a message
+/// that says why, instead of letting the sidecar die at launch:
+/// - plaintext VLESS (no TLS, no VLESS Encryption) or Trojan to a
+///   public IP literal: the core refuses to start at all;
+/// - Shadowsocks method `none`/`plain`: removed from the core;
+/// - REALITY over WebSocket/HTTPUpgrade/mKCP: the docs support REALITY
+///   only on raw (tcp) / xhttp / gRPC.
+/// Note CGNAT 100.64/10 is deliberately NOT private here: core 26.10.31
+/// tightened the private list and it needs TLS/REALITY too.
+fn validate_for_current_core(link: &ParsedShareLink) -> Result<(), String> {
+    // Trojan is TLS-only by definition (same default as the builder).
+    let security = match link.protocol {
+        XrayProtocol::Trojan => link
+            .params
+            .get("security")
+            .map(|s| s.as_str())
+            .unwrap_or("tls"),
+        _ => link
+            .params
+            .get("security")
+            .map(|s| s.as_str())
+            .unwrap_or("none"),
+    };
+    let public_ip =
+        link.host.parse::<std::net::IpAddr>().is_ok() && !is_private_ip_literal(&link.host);
+    match link.protocol {
+        XrayProtocol::Vless => {
+            let encryption = link
+                .params
+                .get("encryption")
+                .map(|s| s.as_str())
+                .unwrap_or("none");
+            if security == "none" && encryption == "none" && public_ip {
+                return Err(err(
+                    "plaintext VLESS to a public address is refused by Xray 26.7.11+: use TLS, REALITY, or VLESS Encryption",
+                ));
+            }
+        }
+        XrayProtocol::Trojan => {
+            if security == "none" && public_ip {
+                return Err(err(
+                    "plaintext Trojan to a public address is refused by Xray 26.7.11+: Trojan needs TLS",
+                ));
+            }
+        }
+        XrayProtocol::Shadowsocks => {
+            if let Some(m) = link.method.as_deref() {
+                if m == "none" || m == "plain" {
+                    return Err(err(
+                        "Shadowsocks method 'none'/'plain' was removed from Xray 26.7.11+",
+                    ));
+                }
+            }
+        }
+        _ => {}
+    }
+    if security == "reality" {
+        let network = link
+            .params
+            .get("type")
+            .map(|s| s.as_str())
+            .unwrap_or("tcp");
+        if !matches!(network, "tcp" | "raw" | "xhttp" | "splithttp" | "grpc") {
+            return Err(err(
+                "REALITY only works over TCP (raw), xhttp or gRPC, not over this transport",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Parse one share link. Returns an error for:
 /// - empty input, unknown scheme (including socks5/http/https, which stay
 ///   on the existing proxy path and must fall back to the caller),
@@ -148,7 +244,7 @@ pub fn parse_share_link(input: &str) -> Result<ParsedShareLink, String> {
         .map(|(s, _)| s.to_ascii_lowercase())
         .ok_or_else(|| err("share link must start with scheme://"))?;
 
-    match scheme.as_str() {
+    let parsed = match scheme.as_str() {
         "vmess" => parse_vmess(before_fragment, name),
         "vless" | "trojan" | "hysteria2" | "hy2" | "ss" | "shadowsocks" => {
             parse_url_form(&scheme, before_fragment, name)
@@ -156,7 +252,9 @@ pub fn parse_share_link(input: &str) -> Result<ParsedShareLink, String> {
         other => Err(err(format!(
             "not an Xray share link (scheme: {other}); use the existing SOCKS5/HTTP path"
         ))),
-    }
+    }?;
+    validate_for_current_core(&parsed)?;
+    Ok(parsed)
 }
 
 fn parse_url_form(
@@ -325,11 +423,28 @@ fn parse_vmess(before_fragment: &str, name: String) -> Result<ParsedShareLink, S
             .ok_or_else(|| err("vmess JSON is missing a valid port"))?;
         let credential = get_str("id").filter(|s| !s.is_empty()).ok_or_else(|| err("vmess JSON is missing id"))?;
         let mut params = BTreeMap::new();
-        for k in ["net", "type", "host", "path", "tls", "sni", "alpn", "security"] {
+        for k in ["net", "host", "path", "tls", "sni", "alpn", "security", "fp", "scy", "aid"] {
             if let Some(val) = get_str(k) {
                 if !val.is_empty() {
                     params.insert(k.to_string(), val);
                 }
+            }
+        }
+        // VMess JSON names differ from the builder's: `net` is the
+        // transport (the builder reads `type`), `tls` is the TLS switch
+        // (the builder reads `security`), `scy` is the user security.
+        // The JSON `type` field is the header type ("none"/"http"),
+        // not a transport, and must not land in `type` — before this
+        // fix a JSON link silently fell back to plaintext (`security`
+        // defaulted to "none") with no fingerprint.
+        if let Some(net) = params.remove("net") {
+            params.insert("type".to_string(), net);
+        }
+        if let Some(tls) = params.remove("tls") {
+            if tls == "tls" {
+                params
+                    .entry("security".to_string())
+                    .or_insert_with(|| "tls".to_string());
             }
         }
         let display_name = if name.is_empty() {
@@ -437,6 +552,63 @@ mod tests {
         let p = parse_share_link(&format!("vmess://{UUID}@example.invalid:443?security=tls")).unwrap();
         assert_eq!(p.protocol, XrayProtocol::Vmess);
         assert_eq!(p.credential, UUID);
+    }
+
+    #[test]
+    fn vmess_json_maps_tls_net_fp_scy_aid() {
+        // JSON: {"v":"2","ps":"VMessNode","add":"example.invalid","port":"443","id":"<UUID>","aid":"0","net":"ws","type":"none","host":"example.invalid","path":"/ws","tls":"tls","sni":"example.invalid","fp":"chrome","scy":"auto"}
+        let json = format!(
+            "{{\"v\":\"2\",\"ps\":\"VMessNode\",\"add\":\"example.invalid\",\"port\":\"443\",\"id\":\"{UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"example.invalid\",\"path\":\"/ws\",\"tls\":\"tls\",\"sni\":\"example.invalid\",\"fp\":\"chrome\",\"scy\":\"auto\"}}"
+        );
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(json.as_bytes());
+        let p = parse_share_link(&format!("vmess://{b64}")).unwrap();
+        // `net` is the transport, `tls` the TLS switch; the JSON header
+        // `type` ("none") must not overwrite the transport.
+        assert_eq!(p.params.get("type").map(|s| s.as_str()), Some("ws"));
+        assert_eq!(p.params.get("security").map(|s| s.as_str()), Some("tls"));
+        assert_eq!(p.params.get("fp").map(|s| s.as_str()), Some("chrome"));
+        assert_eq!(p.params.get("scy").map(|s| s.as_str()), Some("auto"));
+        assert_eq!(p.params.get("aid").map(|s| s.as_str()), Some("0"));
+    }
+
+    #[test]
+    fn plaintext_vless_to_public_ip_is_rejected() {
+        assert!(parse_share_link(&format!(
+            "vless://{UUID}@8.8.8.8:443?encryption=none&security=none#x"
+        ))
+        .is_err());
+        // A private address is still allowed: the core permits it.
+        assert!(parse_share_link(&format!(
+            "vless://{UUID}@192.168.1.10:443?encryption=none&security=none#x"
+        ))
+        .is_ok());
+        // VLESS Encryption satisfies the core rule even in plaintext.
+        assert!(parse_share_link(&format!(
+            "vless://{UUID}@8.8.8.8:443?encryption=mlkem768x25519plus.native.0rtt.0.0&security=none#x"
+        ))
+        .is_ok());
+    }
+
+    #[test]
+    fn plaintext_trojan_and_ss_none_are_rejected() {
+        assert!(parse_share_link("trojan://testpass@8.8.8.8:443?security=none#t").is_err());
+        // No security param: Trojan defaults to TLS, so this is fine.
+        assert!(parse_share_link("trojan://testpass@8.8.8.8:443#t").is_ok());
+        assert!(parse_share_link("ss://none:testpass@example.invalid:8388#s").is_err());
+    }
+
+    #[test]
+    fn reality_over_websocket_is_rejected() {
+        let pbk = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        assert!(parse_share_link(&format!(
+            "vless://{UUID}@example.invalid:443?security=reality&sni=example.com&fp=chrome&pbk={pbk}&sid=aa11&type=ws#r"
+        ))
+        .is_err());
+        assert!(parse_share_link(&format!(
+            "vless://{UUID}@example.invalid:443?security=reality&sni=example.com&fp=chrome&pbk={pbk}&sid=aa11&type=tcp#r"
+        ))
+        .is_ok());
     }
 
     #[test]

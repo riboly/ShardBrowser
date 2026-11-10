@@ -1474,6 +1474,17 @@ export const useProfile = create<ProfileStore>((set, get) => ({
       }
       return moved;
     }
+    const one = ids.length === 1;
+    const name = get().profiles.find((p) => p.id === ids[0])?.name ?? "";
+    const yes = await confirmModal({
+      title: one ? t("useProfile.trashTitleOne", { name }) : t("useProfile.trashTitle", { n: ids.length }),
+      message: t("useProfile.trashMessage"),
+      buttons: [
+        { label: t("confirm.cancel"), value: false },
+        { label: t("useProfile.trashConfirm"), value: true, danger: true },
+      ],
+    });
+    if (yes !== true) return [];
     const { moved, names } = await moveToTrash(set, get, ids);
     if (moved.length === 0) return [];
     toast.undo(

@@ -66,10 +66,15 @@ pub fn free_port() -> std::io::Result<u16> {
 fn stream_settings(link: &ParsedShareLink) -> Value {
     let p = &link.params;
     let network = p.get("type").cloned().unwrap_or_else(|| "tcp".to_string());
-    let security = p
-        .get("security")
-        .cloned()
-        .unwrap_or_else(|| "none".to_string());
+    let security = p.get("security").cloned().unwrap_or_else(|| {
+        // Trojan is TLS-only by definition: a trojan:// link that
+        // carries no security param still negotiates TLS.
+        if link.protocol == XrayProtocol::Trojan {
+            "tls".to_string()
+        } else {
+            "none".to_string()
+        }
+    });
     let mut settings = Map::new();
     settings.insert("network".to_string(), json!(network));
     settings.insert("security".to_string(), json!(security));
@@ -104,9 +109,13 @@ fn stream_settings(link: &ParsedShareLink) -> Value {
                 json!(alpn.split(',').map(str::trim).collect::<Vec<_>>()),
             );
         }
-        if let Some(fp) = p.get("fp") {
-            tls.insert("fingerprint".to_string(), json!(fp));
-        }
+        // Always emitted: empty defaults to Chrome_Auto in the core,
+        // but an explicit chrome keeps the handshake identical across
+        // cores (and, for REALITY, guarantees ML-KEM support).
+        tls.insert(
+            "fingerprint".to_string(),
+            json!(p.get("fp").cloned().unwrap_or_else(|| "chrome".to_string())),
+        );
         settings.insert("tlsSettings".to_string(), Value::Object(tls));
     }
     if security == "reality" {
@@ -114,14 +123,29 @@ fn stream_settings(link: &ParsedShareLink) -> Value {
         if let Some(sni) = p.get("sni") {
             reality.insert("serverName".to_string(), json!(sni));
         }
-        if let Some(fp) = p.get("fp") {
-            reality.insert("fingerprint".to_string(), json!(fp));
-        }
+        // Always emitted (see TLS above): only chrome, firefox and
+        // safari are guaranteed ML-KEM support by the REALITY docs.
+        reality.insert(
+            "fingerprint".to_string(),
+            json!(p.get("fp").cloned().unwrap_or_else(|| "chrome".to_string())),
+        );
+        // Canonical field name: the core renamed publicKey to password;
+        // both are still accepted, password wins if both are set.
         if let Some(pk) = p.get("pbk") {
-            reality.insert("publicKey".to_string(), json!(pk));
+            reality.insert("password".to_string(), json!(pk));
         }
         if let Some(sid) = p.get("sid") {
             reality.insert("shortId".to_string(), json!(sid));
+        }
+        // v2rayN link param `spx`: the initial crawler path. The core
+        // defaults to "/" when absent, but the docs recommend a
+        // per-client value, so a link that carries one must reach the
+        // core verbatim instead of being dropped.
+        if let Some(spx) = p.get("spx") {
+            reality.insert("spiderX".to_string(), json!(spx));
+        }
+        if let Some(mldsa) = p.get("mldsa65Verify") {
+            reality.insert("mldsa65Verify".to_string(), json!(mldsa));
         }
         settings.insert("realitySettings".to_string(), Value::Object(reality));
     }
@@ -199,14 +223,15 @@ fn outbound(link: &ParsedShareLink) -> Value {
                 .map(|a| a.split(',').map(str::trim).filter(|s| !s.is_empty()).collect())
                 .unwrap_or_else(|| vec!["h3"]);
             tls.insert("alpn".to_string(), json!(alpn));
-            // No allowInsecure here: Xray 26.3.27 refuses it at config
-            // load ("removed and migrated to pinnedPeerCertSha256"), so
-            // emitting it killed the sidecar before it ever dialled.
-            // A link's insecure=1 is honoured only through its pin: the
-            // pin replaces CA verification for that certificate. A link
-            // with insecure=1 and no pin gets plain CA verification —
-            // 26.3.27 offers no other skip, and inventing one would be
-            // a config Xray rejects anyway.
+            // No allowInsecure here: it is deprecated in the current
+            // docs and newer cores offer no way to skip certificate
+            // verification at all — the documented replacement is
+            // pinnedPeerCertSha256. A link's insecure=1 is honoured
+            // only through its pin: the pin replaces CA verification
+            // for that certificate. A link with insecure=1 and no pin
+            // gets plain CA verification — the core offers no other
+            // skip, and inventing one would be a config Xray rejects
+            // anyway.
             if let Some(pin) = qp.get("pinSHA256") {
                 // Xray hex-decodes this at config load: anything but
                 // exactly 64 hex chars fails the whole config, so a bad
@@ -535,6 +560,34 @@ mod tests {
     }
 
     #[test]
+    fn reality_config_is_complete_per_latest_docs() {
+        let link = parse_share_link("vless://11111111-2222-3333-4444-555555555555@example.invalid:443?security=reality&sni=example.com&fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=aa11&spx=%2Fproxy&flow=xtls-rprx-vision&encryption=none#r").unwrap();
+        let cfg = build_client_config(&link, 18085);
+        let reality = &cfg["outbounds"][0]["streamSettings"]["realitySettings"];
+        // Canonical field name is `password`, not the old `publicKey`.
+        assert_eq!(reality["password"], "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        assert!(reality["publicKey"].is_null());
+        assert_eq!(reality["serverName"], "example.com");
+        assert_eq!(reality["fingerprint"], "chrome");
+        assert_eq!(reality["shortId"], "aa11");
+        assert_eq!(reality["spiderX"], "/proxy");
+        assert_eq!(
+            cfg["outbounds"][0]["settings"]["vnext"][0]["users"][0]["flow"],
+            "xtls-rprx-vision"
+        );
+    }
+
+    #[test]
+    fn reality_fingerprint_defaults_to_chrome() {
+        let link = parse_share_link("vless://11111111-2222-3333-4444-555555555555@example.invalid:443?security=reality&sni=example.com&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA#r").unwrap();
+        let cfg = build_client_config(&link, 18086);
+        assert_eq!(
+            cfg["outbounds"][0]["streamSettings"]["realitySettings"]["fingerprint"],
+            "chrome"
+        );
+    }
+
+    #[test]
     fn hysteria2_config_shape() {
         // The shape a real hy2 link (SNI, insecure, cert pin) must land in.
         let pin = "0123456789abcdef".repeat(4);
@@ -558,7 +611,7 @@ mod tests {
 
     #[test]
     fn hysteria2_insecure_without_pin_gets_no_skip() {
-        // insecure=1 without a pin cannot be expressed in 26.3.27:
+        // insecure=1 without a pin cannot be expressed in newer cores:
         // allowInsecure is gone, and there is nothing to pin to.
         let parsed =
             parse_share_link("hysteria2://testpass@example.invalid:443?insecure=1#h").unwrap();

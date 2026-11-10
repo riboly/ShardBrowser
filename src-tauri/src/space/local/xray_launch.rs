@@ -107,8 +107,8 @@ fn binary_version_ok(path: &PathBuf) -> bool {
         return false;
     };
     let text = String::from_utf8_lossy(&out.stdout);
-    // `xray version` prints "Xray 26.3.27 (...)", with no "v": checking
-    // for the tag form "v26.3.27" rejected every genuine binary, so
+    // `xray version` prints "Xray 26.11.9 (...)", with no "v": checking
+    // for the tag form "v26.11.9" rejected every genuine binary, so
     // every Xray test fell through to a download that then failed the
     // same check. Compare the bare number.
     let pinned = super::xray_binary::XRAY_VERSION

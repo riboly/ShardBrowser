@@ -5,8 +5,10 @@
 //   node tools/download-xray.mjs --check   # verify an already-downloaded binary, no network
 //
 // Behaviour (mirrors Donut's download-xray.mjs, pinned to the same version):
-// - Xray version is pinned to v26.3.27. Do NOT bump it as part of an upstream
-//   sync; an Xray upgrade is a separate, explicitly approved task.
+// - Xray version is pinned to v26.11.9 (2026-11-09; was v26.3.27 until
+//   2026-11-10, when the old REALITY handshake got servers blocked).
+//   Do NOT bump it as part of an upstream sync; an Xray upgrade is a
+//   separate, explicitly approved task.
 // - The release ZIP is verified by SHA256 in memory BEFORE it is written to
 //   disk. A checksum mismatch fails the build; there is no fallback.
 // - Only `xray` (+ `.exe` on Windows) and LICENSE are extracted, into
@@ -31,29 +33,29 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const XRAY_VERSION = "v26.3.27";
+export const XRAY_VERSION = "v26.11.9";
 export const XRAY_SOURCE_URL = `https://github.com/XTLS/Xray-core/tree/${XRAY_VERSION}`;
 
 export const XRAY_ASSETS = {
   "aarch64-apple-darwin": {
     name: "Xray-macos-arm64-v8a.zip",
-    sha256: "2e93a67e8aa1936ecefb307e120830fcbd4c643ab9b1c46a2d0838d5f8409eaf",
+    sha256: "233f0c66681cd0726f81a6b2b6ed6a5710869e312047b522e46ed53035bebd26",
   },
   "x86_64-apple-darwin": {
     name: "Xray-macos-64.zip",
-    sha256: "f5e0471d3459eff1b82e48af0aeac186abcc3298210070afbbbd8437a4e8b203",
+    sha256: "488963e676e06f5e48547f9dd38116aaca8de4234959b4272ae8f284e658dfd0",
   },
   "x86_64-unknown-linux-gnu": {
     name: "Xray-linux-64.zip",
-    sha256: "23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae",
+    sha256: "b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82",
   },
   "aarch64-unknown-linux-gnu": {
     name: "Xray-linux-arm64-v8a.zip",
-    sha256: "4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c",
+    sha256: "64ed6858982a7f5eb85d88b811089063bd4f17561f4c8f44e0f1dc8e6f6430be",
   },
   "x86_64-pc-windows-msvc": {
     name: "Xray-windows-64.zip",
-    sha256: "d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad",
+    sha256: "1262522266337b824f07beb8e1375786b437683b3890105469088f8e17e0a69d",
   },
 };
 
